@@ -216,6 +216,27 @@ try {
         ]);
     }
 
+    if ($action === 'stock_check') {
+        require_role_or_permission(['cashier', 'admin'], 'sr_sales_dashboard.view', 'print_orders.view');
+        $idsParam = trim((string)($_GET['ids'] ?? ''));
+        $ids = array_values(array_unique(array_filter(array_map(static fn($id) => (int)trim((string)$id), explode(',', $idsParam)), static fn($id) => $id > 0)));
+        if (!$ids) {
+            api_error('Select at least one order before printing.', 422);
+        }
+
+        require_once __DIR__ . '/../../stock_print_lib.php';
+        $check = stock_print_check_orders($pdo, $ids);
+        $location = $check['location'] ?? null;
+        api_json([
+            'success' => true,
+            'can_print' => (bool)($check['can_print'] ?? false),
+            'location_name' => $location['location_name'] ?? '',
+            'location_code' => $location['location_code'] ?? '',
+            'insufficient_items' => $check['insufficient_items'] ?? [],
+            'error' => (string)($check['error'] ?? ''),
+        ]);
+    }
+
     if ($action === 'send_message') {
         require_role_or_permission(['cashier', 'admin'], 'broadcast.view');
         require_once __DIR__ . '/../../helpers.php';

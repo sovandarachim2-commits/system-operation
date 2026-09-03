@@ -50,6 +50,10 @@ if (in_array('sale', $flowParts, true) && in_array('buy_back', $flowParts, true)
 } else {
     $flow = 'sale';
 }
+$paymentStatus = strtolower(inventory_api_str($_GET['payment_status'] ?? ''));
+if (!in_array($paymentStatus, ['paid', 'partial', 'unpaid'], true)) {
+    $paymentStatus = '';
+}
 
 function sold_stock_brand_options(PDO $pdo): array
 {
@@ -107,6 +111,57 @@ function sold_stock_table_has_column(PDO $pdo, string $table, string $column): b
     return isset($cache[$table][strtolower($column)]);
 }
 
+function sold_stock_online_payment_filter_sql(string $status): string
+{
+    $paid = "(COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid')";
+    if ($status === 'paid') {
+        return $paid;
+    }
+    if ($status === 'partial') {
+        return "LOWER(COALESCE(o.status, '')) = 'partial'";
+    }
+    if ($status === 'unpaid') {
+        return "NOT {$paid} AND LOWER(COALESCE(o.status, '')) <> 'partial'";
+    }
+    return '';
+}
+
+function sold_stock_offline_payment_join_sql(): string
+{
+    return "
+        LEFT JOIN (
+            SELECT order_id, SUM(COALESCE(amount, 0)) AS paid_amount
+            FROM offline_sale_payments
+            GROUP BY order_id
+        ) pay ON pay.order_id = o.id";
+}
+
+function sold_stock_offline_paid_expr(): string
+{
+    return "CASE
+        WHEN COALESCE(pay.paid_amount, 0) > 0 THEN LEAST(COALESCE(pay.paid_amount, 0), COALESCE(o.total_amount, 0))
+        WHEN COALESCE(o.received_amount, 0) > 0 THEN LEAST(COALESCE(o.received_amount, 0), COALESCE(o.total_amount, 0))
+        WHEN LOWER(COALESCE(o.status, '')) = 'paid' THEN COALESCE(o.total_amount, 0)
+        ELSE 0
+    END";
+}
+
+function sold_stock_offline_payment_filter_sql(string $status): string
+{
+    $paid = sold_stock_offline_paid_expr();
+    $active = "LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')";
+    if ($status === 'paid') {
+        return "{$active} AND (COALESCE(o.total_amount, 0) <= 0 OR {$paid} >= COALESCE(o.total_amount, 0) - 0.009)";
+    }
+    if ($status === 'partial') {
+        return "{$active} AND COALESCE(o.total_amount, 0) > 0 AND {$paid} > 0 AND {$paid} < COALESCE(o.total_amount, 0) - 0.009";
+    }
+    if ($status === 'unpaid') {
+        return "{$active} AND COALESCE(o.total_amount, 0) > 0 AND {$paid} <= 0";
+    }
+    return '';
+}
+
 /**
  * Same return-order source as admin/product_return_report.php:
  * scanner return_items + order-management returns not already in return_items.
@@ -139,12 +194,18 @@ function sold_stock_online_return_orders_sql(PDO $pdo): string
     )";
 }
 
-function sold_stock_offline_daily_rows(PDO $pdo, string $from, string $to, string $q, int $brandId, int $teamId, int $productId, int $limit): array
+function sold_stock_offline_daily_rows(PDO $pdo, string $from, string $to, string $q, int $brandId, int $teamId, int $productId, string $paymentStatus, int $limit): array
 {
     $saleWhere = ['o.sale_date >= ?', 'o.sale_date <= ?'];
     $buyWhere = ['o.sale_date >= ?', 'o.sale_date <= ?'];
     $saleParams = [$from, $to];
     $buyParams = [$from, $to];
+    $paymentFilter = sold_stock_offline_payment_filter_sql($paymentStatus);
+
+    if ($paymentFilter !== '') {
+        $saleWhere[] = $paymentFilter;
+        $buyWhere[] = $paymentFilter;
+    }
 
     if ($q !== '') {
         $like = '%' . $q . '%';
@@ -200,6 +261,7 @@ function sold_stock_offline_daily_rows(PDO $pdo, string $from, string $to, strin
                 o.sale_date AS last_update
             FROM offline_sale_order_items i
             JOIN offline_sale_orders o ON o.id = i.order_id
+            " . sold_stock_offline_payment_join_sql() . "
             LEFT JOIN products p ON p.id = i.product_id
             LEFT JOIN brands b ON b.id = p.brand_id
             LEFT JOIN offline_teams t ON t.id = o.team_id
@@ -221,6 +283,7 @@ function sold_stock_offline_daily_rows(PDO $pdo, string $from, string $to, strin
                 o.sale_date AS last_update
             FROM offline_sale_purchase_items i
             JOIN offline_sale_orders o ON o.id = i.order_id
+            " . sold_stock_offline_payment_join_sql() . "
             LEFT JOIN products p ON p.id = i.product_id
             LEFT JOIN brands b ON b.id = p.brand_id
             LEFT JOIN offline_teams t ON t.id = o.team_id
@@ -264,7 +327,7 @@ function sold_stock_online_line_qty_expr(string $alias = 'oi'): string
     return "COALESCE({$alias}.quantity, 0) * COALESCE(psi.quantity, 1)";
 }
 
-function sold_stock_online_daily_rows(PDO $pdo, string $from, string $to, string $q, int $brandId, int $productId, int $limit): array
+function sold_stock_online_daily_rows(PDO $pdo, string $from, string $to, string $q, int $brandId, int $productId, string $paymentStatus, int $limit): array
 {
     $lineQty = sold_stock_online_line_qty_expr();
     $setJoins = sold_stock_online_set_joins();
@@ -284,6 +347,12 @@ function sold_stock_online_daily_rows(PDO $pdo, string $from, string $to, string
         'DATE(ro.return_at) <= ?',
     ];
     $returnParams = [$from, $to];
+    $paymentFilter = sold_stock_online_payment_filter_sql($paymentStatus);
+
+    if ($paymentFilter !== '') {
+        $saleWhere[] = $paymentFilter;
+        $returnWhere[] = $paymentFilter;
+    }
 
     if ($q !== '') {
         $like = '%' . $q . '%';
@@ -404,6 +473,12 @@ try {
             'DATE(ro.return_at) <= ?',
         ];
         $returnParams = [$from, $to];
+        $paymentFilter = sold_stock_online_payment_filter_sql($paymentStatus);
+
+        if ($paymentFilter !== '') {
+            $saleWhere[] = $paymentFilter;
+            $returnWhere[] = $paymentFilter;
+        }
 
         if ($q !== '') {
             $like = '%' . $q . '%';
@@ -489,6 +564,11 @@ try {
         $where[] = 'o.sale_date <= ?';
         $params[] = $from;
         $params[] = $to;
+        $paymentFilter = sold_stock_offline_payment_filter_sql($paymentStatus);
+
+        if ($paymentFilter !== '') {
+            $where[] = $paymentFilter;
+        }
 
         if ($flow === 'buy_back') {
             if ($q !== '') {
@@ -523,6 +603,7 @@ try {
                     MAX(o.sale_date) AS last_sold_at
                 FROM offline_sale_purchase_items i
                 JOIN offline_sale_orders o ON o.id = i.order_id
+                " . sold_stock_offline_payment_join_sql() . "
                 LEFT JOIN products p ON p.id = i.product_id
                 LEFT JOIN brands b ON b.id = p.brand_id
                 WHERE " . implode(' AND ', $where) . "
@@ -562,6 +643,7 @@ try {
                     MAX(o.sale_date) AS last_sold_at
                 FROM offline_sale_order_items i
                 JOIN offline_sale_orders o ON o.id = i.order_id
+                " . sold_stock_offline_payment_join_sql() . "
                 LEFT JOIN products p ON p.id = i.product_id
                 LEFT JOIN brands b ON b.id = p.brand_id
                 WHERE " . implode(' AND ', $where) . "
@@ -599,8 +681,8 @@ try {
     }
 
     $dailyRows = $source === 'offline'
-        ? sold_stock_offline_daily_rows($pdo, $from, $to, $q, $brandId, $teamId, $productId, $limit)
-        : sold_stock_online_daily_rows($pdo, $from, $to, $q, $brandId, $productId, $limit);
+        ? sold_stock_offline_daily_rows($pdo, $from, $to, $q, $brandId, $teamId, $productId, $paymentStatus, $limit)
+        : sold_stock_online_daily_rows($pdo, $from, $to, $q, $brandId, $productId, $paymentStatus, $limit);
 
     if ($source === 'offline' && $flow === 'both') {
         $productMap = [];

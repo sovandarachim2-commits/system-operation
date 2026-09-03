@@ -42,6 +42,38 @@ function report_int_list(string $key): array
     return array_values($values);
 }
 
+function report_payment_status(string $key): string
+{
+    $value = strtolower(trim((string)($_GET[$key] ?? '')));
+    return in_array($value, ['paid', 'partial', 'unpaid'], true) ? $value : '';
+}
+
+function report_offline_paid_expr(): string
+{
+    $paymentTotal = "(SELECT COALESCE(SUM(COALESCE(osp.amount, 0)), 0) FROM offline_sale_payments osp WHERE osp.order_id = o.id)";
+    return "CASE
+        WHEN {$paymentTotal} > 0 THEN LEAST({$paymentTotal}, COALESCE(o.total_amount, 0))
+        WHEN COALESCE(o.received_amount, 0) > 0 THEN LEAST(COALESCE(o.received_amount, 0), COALESCE(o.total_amount, 0))
+        WHEN LOWER(COALESCE(o.status, '')) = 'paid' THEN COALESCE(o.total_amount, 0)
+        ELSE 0
+    END";
+}
+
+function report_offline_payment_filter_sql(string $status): string
+{
+    $paid = report_offline_paid_expr();
+    if ($status === 'paid') {
+        return "(COALESCE(o.total_amount, 0) <= 0 OR {$paid} >= COALESCE(o.total_amount, 0) - 0.009)";
+    }
+    if ($status === 'partial') {
+        return "(COALESCE(o.total_amount, 0) > 0 AND {$paid} > 0 AND {$paid} < COALESCE(o.total_amount, 0) - 0.009)";
+    }
+    if ($status === 'unpaid') {
+        return "(COALESCE(o.total_amount, 0) > 0 AND {$paid} <= 0)";
+    }
+    return '';
+}
+
 try {
     $pdo = get_db_connection();
     offline_ensure_schema($pdo);
@@ -56,6 +88,7 @@ try {
     $teamId = $teamIds === [] ? report_int('team_id') : null;
     $locationId = report_int('location_id');
     $brandId = report_int('brand_id');
+    $paymentStatus = report_payment_status('payment_status');
 
     $where = [
         'DATE(o.sale_date) >= ?',
@@ -94,10 +127,15 @@ try {
         $params[] = $brandId;
         $params[] = $brandId;
     }
+    $paymentFilter = report_offline_payment_filter_sql($paymentStatus);
+    if ($paymentFilter !== '') {
+        $where[] = $paymentFilter;
+    }
 
     $whereSql = implode(' AND ', $where);
     $itemWhereSql = $whereSql;
     $itemParams = $params;
+    $paidExpr = report_offline_paid_expr();
     if ($brandId !== null) {
         $itemWhereSql .= ' AND p.brand_id = ?';
         $itemParams[] = $brandId;
@@ -111,8 +149,8 @@ try {
             COALESCE(SUM(o.discount), 0) AS total_discount,
             COALESCE(SUM(GREATEST(COALESCE(o.purchase_total, 0) + COALESCE(o.discount, 0) - COALESCE(o.subtotal, 0), 0)), 0) AS shop_pay_back_total,
             COALESCE(SUM(o.total_amount), 0) AS net_total,
-            COALESCE(SUM(o.received_amount), 0) AS paid_total,
-            COALESCE(SUM(GREATEST(o.total_amount - o.received_amount, 0)), 0) AS unpaid_total
+            COALESCE(SUM({$paidExpr}), 0) AS paid_total,
+            COALESCE(SUM(GREATEST(o.total_amount - {$paidExpr}, 0)), 0) AS unpaid_total
         FROM offline_sale_orders o
         WHERE {$whereSql}
     ");
@@ -527,6 +565,7 @@ try {
             'team_ids' => $teamIds,
             'location_id' => $locationId,
             'brand_id' => $brandId,
+            'payment_status' => $paymentStatus,
         ],
         'summary' => $summary,
         'totals' => $summary,
@@ -544,7 +583,5 @@ try {
     error_log('offline_daily_sales API error: ' . $e->getMessage());
     api_error('Unable to load offline daily sales report.', 500);
 }
-
-
 
 

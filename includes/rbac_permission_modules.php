@@ -154,6 +154,8 @@ function rbac_system_report_modules(): array
     return [
         'Report' => [
             ['resource' => 'sr_sales_dashboard', 'label' => 'Sales Dashboard', 'actions' => ['view']],
+            ['resource' => 'sr_delivery_summary', 'label' => 'Delivery Summary', 'actions' => ['view']],
+            ['resource' => 'sr_ai_scan', 'label' => 'AI Scan', 'actions' => ['view', 'create', 'update', 'delete']],
             ['resource' => 'sr_financial_summary', 'label' => 'Revenue', 'actions' => ['view']],
             ['resource' => 'sr_inventory_sold_offline', 'label' => 'Stock Sold Offline', 'actions' => ['view']],
             ['resource' => 'sr_inventory_sold_online', 'label' => 'Stock Sold Online', 'actions' => ['view']],

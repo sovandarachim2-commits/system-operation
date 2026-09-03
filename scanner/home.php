@@ -248,8 +248,20 @@ $user = current_user();
     </button>
   </div>
   <script>
-    // Back button behavior - redirect based on role
+    // Back button behavior - redirect based on role, or back to report system
     function handleBackClick() {
+      // If opened from the report system, return there (URL param or stored session).
+      var returnUrl = new URLSearchParams(window.location.search).get('return') || null;
+      try { if (sessionStorage.getItem('ai_scan_return')) { returnUrl = returnUrl || sessionStorage.getItem('ai_scan_return'); } } catch (e) {}
+      if (returnUrl) {
+        try {
+          var target = new URL(returnUrl, window.location.origin);
+          if (target.origin === window.location.origin) {
+            window.location.href = target.href;
+            return;
+          }
+        } catch (e) { /* fall through to default */ }
+      }
       const userRole = <?php echo json_encode($user['role'] ?? ''); ?>;
       if (userRole === 'admin') {
         window.location.href = "../admin/statistics.php";
@@ -261,6 +273,13 @@ $user = current_user();
         window.location.href = "../index.php";
       }
     }
+    // Persist the return target so it survives navigation across scanner pages.
+    (function storeReturn() {
+      var r = new URLSearchParams(window.location.search).get('return');
+      if (r) {
+        try { sessionStorage.setItem('ai_scan_return', r); } catch (e) {}
+      }
+    })();
     
     // Attach to both back buttons
     document.getElementById("backBtn").onclick = handleBackClick;

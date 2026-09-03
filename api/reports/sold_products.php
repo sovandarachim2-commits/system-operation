@@ -35,6 +35,24 @@ function sold_api_month(?string $value, ?string $fallbackDate = null): string
     return date('Y-m');
 }
 
+function sold_payment_status(): string
+{
+    $value = strtolower(trim((string)($_GET['payment_status'] ?? '')));
+    return in_array($value, ['paid', 'unpaid'], true) ? $value : '';
+}
+
+function sold_payment_filter_sql(string $status): string
+{
+    $paid = "(COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid')";
+    if ($status === 'paid') {
+        return $paid;
+    }
+    if ($status === 'unpaid') {
+        return "NOT {$paid}";
+    }
+    return '';
+}
+
 function sold_product_cost_table_exists(PDO $pdo): bool
 {
     try {
@@ -96,6 +114,7 @@ try {
     $brandId = filter_var($_GET['brand_id'] ?? null, FILTER_VALIDATE_INT);
     $sellerId = filter_var($_GET['seller_id'] ?? null, FILTER_VALIDATE_INT);
     $categoryId = filter_var($_GET['category_id'] ?? null, FILTER_VALIDATE_INT);
+    $paymentStatus = sold_payment_status();
 
     $where = ['COALESCE(o.is_cancelled, 0) = 0'];
     $params = [];
@@ -135,6 +154,10 @@ try {
     if ($categoryId !== false && $categoryId !== null) {
         $where[] = 'p.category_id = ?';
         $params[] = (int)$categoryId;
+    }
+    $paymentFilter = sold_payment_filter_sql($paymentStatus);
+    if ($paymentFilter !== '') {
+        $where[] = $paymentFilter;
     }
 
     $whereSql = 'WHERE ' . implode(' AND ', $where);
@@ -569,6 +592,7 @@ try {
             o.total_amount,
             o.discount,
             o.status,
+            o.is_paid,
             o.is_cancelled,
             o.is_returned,
             o.payment_method,
@@ -593,7 +617,8 @@ try {
           " . (($brandId !== false && $brandId !== null) ? "AND p.brand_id = ?" : "") . "
           " . (($sellerId !== false && $sellerId !== null) ? "AND o.seller_id = ?" : "") . "
           " . (($categoryId !== false && $categoryId !== null) ? "AND p.category_id = ?" : "") . "
-        GROUP BY o.id, o.order_code, o.customer_name, o.total_amount, o.discount, o.status, o.is_cancelled, o.is_returned, o.payment_method, pj.printed_at, u.name, u.username
+          " . ($paymentFilter !== '' ? "AND {$paymentFilter}" : "") . "
+        GROUP BY o.id, o.order_code, o.customer_name, o.total_amount, o.discount, o.status, o.is_paid, o.is_cancelled, o.is_returned, o.payment_method, pj.printed_at, u.name, u.username
         ORDER BY pj.printed_at DESC
     ");
     $orderParams = [];
@@ -682,7 +707,7 @@ try {
         } elseif ($isReturned) {
             $detailedSummary['returned_orders']++;
             $order['status_label'] = 'Returned';
-        } elseif (($order['status'] ?? '') === 'paid') {
+        } elseif ((int)($order['is_paid'] ?? 0) === 1 || strtolower((string)($order['status'] ?? '')) === 'paid') {
             $order['status_label'] = 'Paid';
         } else {
             $order['status_label'] = 'Unpaid';
@@ -754,6 +779,15 @@ try {
         'product_detail_list' => $detailProducts,
         'detailed_orders' => $detailedOrders,
         'detailed_summary' => $detailedSummary,
+        'filters' => [
+            'from' => $from,
+            'to' => $to,
+            'product_id' => $productId !== false ? $productId : null,
+            'brand_id' => $brandId !== false ? $brandId : null,
+            'seller_id' => $sellerId !== false ? $sellerId : null,
+            'category_id' => $categoryId !== false ? $categoryId : null,
+            'payment_status' => $paymentStatus,
+        ],
         'pagination' => [
             'limit' => $limit,
             'offset' => $offset,
@@ -765,5 +799,3 @@ try {
     error_log('sold_products API error: ' . $e->getMessage());
     api_error('Unable to load sold products.', 500);
 }
-
-
