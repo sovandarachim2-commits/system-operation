@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Under Maintenance - Order System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        .maintenance-container {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .maintenance-card {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+        }
+        .gear-spin {
+            animation: spin 3s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="maintenance-container">
+        <div class="container">
+            <div class="row justify-content-center">
+                <div class="col-md-8">
+                    <div class="maintenance-card p-5">
+                        <div class="text-center mb-4">
+                            <i class="bi bi-tools gear-spin display-1 text-primary mb-3"></i>
+                            <h1 class="display-4 fw-bold text-dark mb-3">Under Maintenance</h1>
+                            <p class="lead text-muted">
+                                We're currently performing scheduled maintenance to improve our services.
+                            </p>
+                        </div>
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-4 text-center mb-3">
+                                <div class="bg-light rounded p-3">
+                                    <i class="bi bi-clock-history text-primary fs-2 mb-2"></i>
+                                    <h6 class="fw-bold">Temporary</h6>
+                                    <small class="text-muted">This won't take long</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4 text-center mb-3">
+                                <div class="bg-light rounded p-3">
+                                    <i class="bi bi-shield-check text-success fs-2 mb-2"></i>
+                                    <h6 class="fw-bold">Safe & Secure</h6>
+                                    <small class="text-muted">Your data is protected</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4 text-center mb-3">
+                                <div class="bg-light rounded p-3">
+                                    <i class="bi bi-arrow-clockwise text-info fs-2 mb-2"></i>
+                                    <h6 class="fw-bold">Back Soon</h6>
+                                    <small class="text-muted">Better than ever</small>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="alert alert-info pulse">
+                            <i class="bi bi-info-circle-fill me-2"></i>
+                            <strong>We apologize for the inconvenience.</strong> 
+                            Please check back in a few minutes. If you need immediate assistance, 
+                            please contact your system administrator.
+                        </div>
+                        
+                        <div class="text-center mt-4">
+                            <div class="spinner-border text-primary me-2" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <small class="text-muted">Working on it...</small>
+                        </div>
+                        
+                        <div class="text-center mt-4">
+                            <button class="btn btn-outline-primary" onclick="location.reload()">
+                                <i class="bi bi-arrow-clockwise me-1"></i>
+                                Refresh Page
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Auto-refresh every 30 seconds
+        setTimeout(function() {
+            location.reload();
+        }, 30000);
+    </script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

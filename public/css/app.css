@@ -1,0 +1,170 @@
+/* Khmer OS Font - custom for Khmer text */
+:root {
+    --font-khmer:   'Khmer OS Battambang', 'Khmer OS Siemreap', 'Khmer', sans-serif;
+}
+
+.font-khmer,
+.khmer {
+    font-family: var(--font-khmer) !important;
+}
+
+html, body {
+    height: 100%;
+}
+
+body {
+    background: #fdf2f8; /* soft pink background */
+    font-family: var(--font-khmer);
+}
+
+.navbar-dark.bg-dark {
+    background: linear-gradient(90deg, #db2777, #8b5cf6) !important; /* pink to purple */
+}
+
+.fullscreen-center {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.card-fullscreen {
+    width: 100%;
+    max-width: 420px;
+    border-radius: 1rem;
+    box-shadow: 0 20px 45px rgba(219, 39, 119, 0.25);
+}
+
+.table-responsive-full {
+    flex: 1 1 auto;
+    overflow: auto;
+}
+
+.btn-lg, .form-control-lg, .form-select-lg {
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+    font-size: 1.05rem;
+}
+
+.btn-primary {
+    background-color: #db2777;
+    border-color: #db2777;
+}
+
+.btn-primary:hover,
+.btn-primary:focus {
+    background-color: #be185d;
+    border-color: #be185d;
+}
+
+.btn-outline-primary {
+    color: #db2777;
+    border-color: #db2777;
+}
+
+.btn-outline-primary:hover,
+.btn-outline-primary:focus {
+    background-color: #db2777;
+    border-color: #db2777;
+    color: #fff;
+}
+
+.gradient-card-primary {
+    background: linear-gradient(135deg, #ec4899, #8b5cf6);
+}
+
+.gradient-card-secondary {
+    background: linear-gradient(135deg, #fb7185, #f97316);
+}
+
+.gradient-card-tertiary {
+    background: linear-gradient(135deg, #22c55e, #06b6d4);
+}
+
+.gradient-card-accent {
+    background: linear-gradient(135deg, #6366f1, #a855f7);
+}
+
+.card {
+    border-radius: 1rem;
+}
+
+main .container-fluid {
+    display: flex;
+    flex-direction: column;
+}
+
+/* Seller new order panels */
+.seller-panel {
+    border-radius: 1.5rem;
+    padding: 1.5rem 1.5rem 1.25rem;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+    margin-bottom: 1.5rem;
+}
+
+.seller-panel-yellow {
+    background: #fde68a;
+}
+
+.seller-panel-pink {
+    background: #f9a8d4;
+}
+
+.seller-panel-peach {
+    background: #fed7d7;
+}
+
+.seller-panel h2,
+.seller-panel h3 {
+    font-size: 1rem;
+}
+
+.seller-label {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.seller-input,
+.seller-select {
+    border-radius: 999px;
+    border: none;
+    padding-left: 1.25rem;
+    padding-right: 1.25rem;
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.08) inset;
+}
+
+.seller-panel .btn-add-more {
+    border-radius: 999px;
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+}
+
+.btn-next {
+    background: #312e81;
+    border-color: #312e81;
+}
+
+.btn-next:hover,
+.btn-next:focus {
+    background: #1e1b4b;
+    border-color: #1e1b4b;
+}
+
+.btn-cancel-soft {
+    background: #e5e7eb;
+    border-color: #e5e7eb;
+    color: #374151;
+}
+
+.btn-cancel-soft:hover,
+.btn-cancel-soft:focus {
+    background: #d1d5db;
+    border-color: #d1d5db;
+    color: #111827;
+}
+
+@media (min-width: 992px) {
+    .card-fullscreen {
+        max-width: 480px;
+    }
+}

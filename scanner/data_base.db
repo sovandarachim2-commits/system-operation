@@ -1,0 +1,86 @@
+CREATE TABLE IF NOT EXISTS confirm_items (
+    id int(11) NOT NULL AUTO_INCREMENT,
+    inv_number varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL UNIQUE,
+    phone_number varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    action varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    input_value text COLLATE utf8mb4_unicode_ci,
+    created_at timestamp DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_inv_number (inv_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS out_items (
+    id int(11) NOT NULL AUTO_INCREMENT,
+    inv varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
+    delivery_by varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
+    inv_photo varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    full_photo varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    user_phone varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    date_time datetime DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_inv (inv),
+    KEY idx_user_phone (user_phone)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS product_entries (
+    id int(11) NOT NULL AUTO_INCREMENT,
+    inv varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+    phone varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    status varchar(32) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    amount decimal(10,2) DEFAULT NULL,
+    inv_photo varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    full_photo varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    user varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT 'default_user',
+    datetime datetime DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_inv (inv),
+    KEY idx_phone (phone)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS prepare_set (
+    id int(11) NOT NULL AUTO_INCREMENT,
+    inv varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+    set varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+    photo varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+    user varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT 'default_user',
+    date_time datetime DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_inv (inv)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE return_items (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  inv VARCHAR(100) NOT NULL,
+  delivery_by VARCHAR(100),
+  reason TEXT,
+  username VARCHAR(100),
+  inv_photo VARCHAR(255),
+  full_photo VARCHAR(255),
+  date_time DATETIME,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX (inv)
+);
+
+
+CREATE TABLE `product_entries` (
+  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `inv` VARCHAR(255) NOT NULL,
+  `phone` VARCHAR(50) NOT NULL,
+  `status` VARCHAR(50) NOT NULL,
+  `amount` DECIMAL(12,2) NOT NULL,
+  `inv_photo` VARCHAR(255) DEFAULT NULL,
+  `full_photo` VARCHAR(255) DEFAULT NULL,
+  `user` VARCHAR(100) NOT NULL,
+  `datetime` DATETIME NOT NULL,
+  `set_type` VARCHAR(16) DEFAULT 'non-set',        -- 'set' or 'non-set'
+  `set_qr` VARCHAR(255) DEFAULT '',                -- the main Set QR value
+  `sub_name_json` TEXT DEFAULT NULL                -- stores all sub sets as a JSON array
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+//add table more in product_entries
+ALTER TABLE `product_entries`
+  ADD COLUMN `set_type` VARCHAR(16) DEFAULT 'non-set',
+  ADD COLUMN `set_qr` VARCHAR(255) DEFAULT '',
+  ADD COLUMN `sub_name_json` TEXT DEFAULT NULL;
