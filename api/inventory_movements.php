@@ -31,6 +31,20 @@ foreach (inventory_location_options($pdo) as $loc) {
 
 $movements = [];
 
+function inventory_display_document_code(string $referenceType, string $code): string
+{
+    $code = inventory_api_str($code);
+    if ($code === '') {
+        return '';
+    }
+    $type = strtolower(inventory_api_str($referenceType));
+    if (($type === '' || in_array($type, ['dealer_order', 'dealer_order_reverse'], true))
+        && preg_match('/^(DO\d{9})(?:-.+)?$/i', $code, $match)) {
+        return strtoupper($match[1]);
+    }
+    return $code;
+}
+
 try {
     $sql = '
         SELECT
@@ -92,11 +106,15 @@ try {
             $locationLabel = $locationMap[$toId] ?? ('Location #' . $toId);
         }
 
+        $rawReferenceNo = inventory_api_str($row['reference_no'] ?? '');
+        $displayReferenceNo = inventory_display_document_code(
+            inventory_api_str($row['reference_type'] ?? ''),
+            $rawReferenceNo
+        );
+        $fallbackReferenceId = (int)($row['reference_id'] ?? 0) > 0 ? '#' . (int)$row['reference_id'] : '';
         $refParts = array_filter([
             inventory_api_str($row['reference_type'] ?? ''),
-            inventory_api_str($row['reference_no'] ?? '') !== ''
-                ? inventory_api_str($row['reference_no'])
-                : ((int)($row['reference_id'] ?? 0) > 0 ? '#' . (int)$row['reference_id'] : ''),
+            $displayReferenceNo !== '' ? $displayReferenceNo : $fallbackReferenceId,
         ]);
 
         $movements[] = [
@@ -118,8 +136,8 @@ try {
             'reference_type' => $row['reference_type'],
             'reference_id' => $row['reference_id'],
             'reference' => implode(' ', $refParts),
-            'document_code' => (static function () use ($row): string {
-                $no = inventory_api_str($row['reference_no'] ?? '');
+            'document_code' => (static function () use ($row, $displayReferenceNo): string {
+                $no = $displayReferenceNo;
                 if ($no !== '' && !in_array(strtolower($no), ['transfer', 'adjustment', 'in', 'out'], true)) {
                     return $no;
                 }
@@ -279,11 +297,11 @@ try {
                 'to_location' => $toId ? ($locationMap[$toId] ?? ('Location #' . $toId)) : '',
                 'reference_type' => $refType,
                 'reference_id' => $refId,
-                'reference' => trim($refType . ($refId !== '' ? ' #' . $refId : '')),
+                'reference' => trim($refType . ($refId !== '' ? ' #' . inventory_display_document_code($refType, $refId) : '')),
                 'document_code' => (
                     $refId !== ''
                     && !in_array(strtolower($refId), ['transfer', 'adjustment', 'in', 'out'], true)
-                ) ? $refId : '',
+                ) ? inventory_display_document_code($refType, $refId) : '',
                 'notes' => $hasNotes ? inventory_notes_display((string)($row['notes'] ?? ''), $locationMap) : '',
                 'movement_date' => $row['movement_date'],
                 'created_by' => $createdByName,

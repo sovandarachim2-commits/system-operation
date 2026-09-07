@@ -604,6 +604,10 @@ function dealer_api_save_order(PDO $pdo, array $payload, array $user): void
     $userId = (int)($user['id'] ?? 0) ?: null;
     $orderDate = dealer_api_date($order['order_date'] ?? null);
     $orderCode = dealer_api_str($order['order_code'] ?? '') ?: dealer_api_next_order_code($pdo, $orderDate);
+    $status = dealer_api_str($order['status'] ?? 'confirmed') ?: 'confirmed';
+    if (strtolower($status) === 'draft') {
+        $status = 'confirmed';
+    }
     $lines = is_array($order['lines'] ?? null) ? $order['lines'] : [];
     if (!$lines) {
         api_error('Add at least one product.', 422);
@@ -641,7 +645,7 @@ function dealer_api_save_order(PDO $pdo, array $payload, array $user): void
                 dealer_api_str($order['sales_person'] ?? ''), dealer_api_str($order['payment_method'] ?? ''), dealer_api_str($order['payment_reference'] ?? ''),
                 dealer_api_str($order['payment_note'] ?? ''), dealer_api_str($order['payment_date'] ?? '') ?: null,
                 dealer_api_str($order['delivery_method'] ?? 'Pickup'), dealer_api_num($order['delivery_fee'] ?? 0),
-                dealer_api_str($order['status'] ?? 'confirmed') ?: 'confirmed', dealer_api_str($order['payment_status'] ?? 'unpaid') ?: 'unpaid',
+                $status, dealer_api_str($order['payment_status'] ?? 'unpaid') ?: 'unpaid',
                 dealer_api_num($order['subtotal'] ?? 0), dealer_api_num($order['discount_total'] ?? 0), dealer_api_num($order['grand_total'] ?? 0),
                 dealer_api_num($order['paid_amount'] ?? 0), dealer_api_num($order['balance_amount'] ?? 0), dealer_api_num($order['change_amount'] ?? 0),
                 !empty($order['stock_deducted']) ? 1 : 0, dealer_api_datetime($order['stock_deducted_at'] ?? ''),
@@ -668,7 +672,7 @@ function dealer_api_save_order(PDO $pdo, array $payload, array $user): void
                 dealer_api_str($order['sales_person'] ?? ''), dealer_api_str($order['payment_method'] ?? ''), dealer_api_str($order['payment_reference'] ?? ''),
                 dealer_api_str($order['payment_note'] ?? ''), dealer_api_str($order['payment_date'] ?? '') ?: null,
                 dealer_api_str($order['delivery_method'] ?? 'Pickup'), dealer_api_num($order['delivery_fee'] ?? 0),
-                dealer_api_str($order['status'] ?? 'confirmed') ?: 'confirmed', dealer_api_str($order['payment_status'] ?? 'unpaid') ?: 'unpaid',
+                $status, dealer_api_str($order['payment_status'] ?? 'unpaid') ?: 'unpaid',
                 dealer_api_num($order['subtotal'] ?? 0), dealer_api_num($order['discount_total'] ?? 0), dealer_api_num($order['grand_total'] ?? 0),
                 dealer_api_num($order['paid_amount'] ?? 0), dealer_api_num($order['balance_amount'] ?? 0), dealer_api_num($order['change_amount'] ?? 0),
                 !empty($order['stock_deducted']) ? 1 : 0, dealer_api_datetime($order['stock_deducted_at'] ?? ''),
