@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 require_once __DIR__ . '/../auth.php';
 require_role_or_permission(['admin'], 'offline_sales.view', 'offline_sales.create');
 require_once __DIR__ . '/offline_lib.php';
@@ -244,8 +244,8 @@ function status_kh(string $s): string {
             border-top: 1px dashed #e5e7eb;
             margin: .6rem 0;
         }
-        .label-col { color: #000; font-weight: 600; font-size: 17px; }
-        .value-col { color: #000; font-weight: 600; font-size: 15px; }
+        .label-col { color: #000; font-weight: 600; font-size: 16px; }
+        .value-col { color: #000; font-weight: 600; font-size: 16px; }
         /* ── status stamp ── */
         .status-stamp {
             display: inline-block;
@@ -491,9 +491,10 @@ function status_kh(string $s): string {
         <?php if ($isInvoice): ?>
         /* ── A5 invoice — single page ── */
         @media print {
-            @page { size: A5 portrait; margin: 6mm 8mm; }
+            @page { margin: 6mm 8mm; }
             body, html { margin:0; padding:0; }
-            .invoice-bundle { max-width:100%; margin:0; page-break-after:auto; }
+            .invoice-bundle { max-width:100%; margin:0; page-break-after:always; break-after:page; page-break-inside:avoid; break-inside:avoid; }
+            .invoice-bundle:last-of-type { page-break-after:auto; break-after:auto; }
             .invoice-page   { padding:8px 12px !important; box-shadow:none !important; }
             /* header */
             .inv-top        { margin-bottom:6px !important; }
@@ -1015,3 +1016,4 @@ window.addEventListener('load', function () { window.print(); });
 </script>
 </body>
 </html>
+
