@@ -245,6 +245,11 @@ $qrText = $order['order_code'];
 // Use a public QR API to generate PNG
 $qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=' . urlencode($qrText);
 
+$costLabel = $order['delivery_cost_label'] ?? '';
+if ($costLabel === '' && isset($order['delivery_cost_amount']) && $order['delivery_cost_amount'] !== null) {
+    $costLabel = '$' . number_format($order['delivery_cost_amount'], 2);
+}
+
 require_once __DIR__ . '/config.php';
 ?><!DOCTYPE html>
 <html lang="en">
@@ -253,10 +258,11 @@ require_once __DIR__ . '/config.php';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Receipt <?= htmlspecialchars($order['order_code']) ?></title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;600;700;900&family=Battambang:wght@400;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
     <style>
         :root {
-            --receipt-font-khmer: "Khmer OS Battambang", "Khmer OS Siemreap", "Khmer", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            --receipt-font-khmer: "Khmer OS Battambang", "Battambang", "Noto Sans Khmer", system-ui, sans-serif;
         }
         body {
             background: #e5e7eb;
@@ -270,52 +276,154 @@ require_once __DIR__ . '/config.php';
         }
         .receipt-card {
             max-width: 360px;
-            margin: 1.5rem auto;
-            border-radius: 1.25rem;
-            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+            margin: 1rem auto;
+            border-radius: 8px;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.16);
             background: #ffffff;
-            border: 1px solid #e5e7eb;
+            border: 1px solid #000000;
+            overflow: hidden;
         }
-        .receipt-header-logo {
-            text-align: center;
-            margin-bottom: 0.5rem;
-        }
-        .receipt-header-logo img {
-            max-height: 90px;
-            max-width: 150px;
-            object-fit: contain;
+        .receipt-card .card-body {
+            padding: 0 !important;
         }
         .receipt-title {
-            font-size: 0.8rem;
-            font-weight: 700;
-            letter-spacing: 0.14em;
-            text-transform: uppercase;
-            text-align: center;
-            margin-bottom: 0.75rem;
-            color: #000000ff;
-        }
-        .section-title {
-            font-size: 0.75rem;
-            font-weight: 700;
+            padding: 7px 10px 3px;
+            font-size: 14px;
+            font-weight: 900;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: #000000ff;
-            margin-bottom: 0.25rem;
+            text-align: center;
+            margin: 0;
+            color: #000000;
+        }
+        .receipt-brand-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 10px;
+            padding: 4px 10px 7px;
+        }
+        .receipt-header-logo {
+            min-width: 0;
+            text-align: left;
+        }
+        .receipt-header-logo img {
+            display: block;
+            max-height: 48px;
+            max-width: 128px;
+            object-fit: contain;
+        }
+        .section-title {
+            font-size: 11px;
+            font-weight: 900;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: #000000;
+            margin: 0 0 3px;
         }
         .receipt-qr {
-            width: 72px;
-            height: 72px;
-            margin-left: -112px;
-        }
-
-        .amount-col {
-            text-align: left;
-            min-width: 80px;
-            margin-left: -20px;
+            display: block;
+            width: 54px;
+            height: 54px;
+            object-fit: contain;
+            flex: 0 0 54px;
         }
         .section-divider {
-            border-top: 1px solid black;
-            margin: 0.6rem 0 0.6rem 0;
+            display: none;
+        }
+        .receipt-box-section {
+            border-top: 1px solid #000000;
+            padding: 6px 10px;
+        }
+        .receipt-info-split {
+            display: grid;
+            grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+            padding: 0;
+        }
+        .receipt-info-panel {
+            min-width: 0;
+            padding: 6px 10px;
+        }
+        .receipt-info-panel + .receipt-info-panel {
+            border-left: 1px solid #000000;
+        }
+        .info-row {
+            display: grid;
+            grid-template-columns: 44px minmax(0, 1fr);
+            gap: 6px;
+            margin: 2px 0 0;
+            color: #000;
+            font-size: 12px;
+            line-height: 1.25;
+        }
+        .receipt-seller-block {
+            color: #000;
+            font-size: 12px;
+            font-weight: 800;
+            line-height: 1.25;
+        }
+        .receipt-code {
+            display: block;
+            margin-top: 2px;
+            overflow-wrap: anywhere;
+        }
+        .receipt-simple-row,
+        .receipt-total-line,
+        .receipt-payment-line,
+        .receipt-meta-line {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+            color: #000;
+            font-size: 12px;
+            line-height: 1.25;
+        }
+        .receipt-simple-row + .receipt-simple-row {
+            margin-top: 3px;
+        }
+        .receipt-row-name,
+        .receipt-payment-left,
+        .receipt-meta-value {
+            min-width: 0;
+            font-weight: 800;
+            overflow-wrap: anywhere;
+        }
+        .receipt-payment-line {
+            margin-top: 2px;
+        }
+        .receipt-payment-line > span {
+            min-width: 0;
+        }
+        .receipt-note {
+            margin-top: 4px;
+            color: #000;
+            font-size: 11px;
+            line-height: 1.3;
+            font-weight: 800;
+            overflow-wrap: anywhere;
+        }
+        .receipt-total-line {
+            margin-top: 2px;
+        }
+        .receipt-footer {
+            border-top: 1px solid #000000;
+            padding: 6px 10px;
+            text-align: right;
+            color: #000;
+            font-size: 12px;
+            font-weight: 900;
+        }
+        .amount-col,
+        .receipt-amount {
+            text-align: right;
+            min-width: 80px;
+            white-space: nowrap;
+        }
+        .receipt-grand {
+            color: #000;
+            font-size: 18px;
+            font-weight: 900;
         }
         .receipt-lucky-outer-card {
             border-radius: 0.75rem;
@@ -401,13 +509,14 @@ require_once __DIR__ . '/config.php';
         }
         .label-col {
             color: #000000ff;
-            font-weight: 600;
-            font-size: 18px;
+            font-weight: 800;
+            font-size: 12px;
         }
         .value-col {
             color: #000000ff;
-            font-weight: 600;
-            font-size: 18px;
+            font-weight: 800;
+            font-size: 12px;
+            overflow-wrap: anywhere;
         }
         .btn-pill {
             border-radius: 999px;
@@ -446,7 +555,8 @@ require_once __DIR__ . '/config.php';
             .receipt-card {
                 box-shadow: none;
                 border: none;
-                margin: 0 auto;
+                margin: 0;
+                max-width: 100%;
                 page-break-inside: avoid;
             }
             .receipt-lucky-outer-card {
@@ -479,126 +589,95 @@ require_once __DIR__ . '/config.php';
     <div class="receipt-card card">
         <div class="card-body p-3" id="receiptRoot">
             <div id="receiptContent">
-            <div class="receipt-header-logo">
-                <?php if ($logo): ?>
-                    <img src="<?= htmlspecialchars(uploaded_file_url($logo['file_path'], 'logos')) ?>" alt="Logo">
-                <?php endif; ?>
-            </div>
             <div class="receipt-title">Order Receipt</div>
+            <div class="receipt-brand-row">
+                <div class="receipt-header-logo">
+                    <?php if ($logo): ?>
+                        <img src="<?= htmlspecialchars(uploaded_file_url($logo['file_path'], 'logos')) ?>" alt="Logo">
+                    <?php endif; ?>
+                </div>
+                <img src="<?= htmlspecialchars($qrUrl) ?>" alt="QR" class="receipt-qr">
+            </div>
 
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <div class="small">
-                    <div>
-                        <span class="label-col" style="font-size:16px;">Seller:</span>
-                        <span class="value-col" style="font-size:16px;"><?= htmlspecialchars($order['seller_name']) ?></span>
+            <div class="receipt-box-section receipt-info-split">
+                <div class="receipt-info-panel">
+                    <div class="receipt-seller-block">
+                        <span>Seller:</span> <?= htmlspecialchars($order['seller_name']) ?>
+                        <span class="receipt-code">Code:<br><?= htmlspecialchars($order['order_code']) ?></span>
                     </div>
-                    <div style="font-weight:600; font-size:14px; margin-top:2px;color:black">
-                        Code: <?= htmlspecialchars($order['order_code']) ?>
+                </div>
+                <div class="receipt-info-panel">
+                    <div class="section-title">Customer</div>
+                    <div class="info-row"><span class="label-col">Name</span><span class="value-col"><?= htmlspecialchars($order['customer_name']) ?></span></div>
+                    <?php if (!empty($order['phone'])): ?>
+                    <div class="info-row"><span class="label-col">Phone</span><span class="value-col"><?= htmlspecialchars($order['phone']) ?></span></div>
+                    <?php endif; ?>
+                    <?php if (!empty($order['location'])): ?>
+                    <div class="info-row"><span class="label-col">&#x1791;&#x17B8;&#x178F;&#x17B6;&#x17C6;&#x1784;</span><span class="value-col"><?= htmlspecialchars($order['location']) ?></span></div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <div class="receipt-box-section">
+                <div class="section-title">Products</div>
+                <?php foreach ($receiptDisplayItems as $item): ?>
+                    <div class="receipt-simple-row">
+                        <span class="receipt-row-name"><?= (($item['display_kind'] ?? '') === 'lucky_merged') ? 'Lucky box' : htmlspecialchars($item['product_name']) ?> x <?= (int)($item['quantity'] ?? 0) ?></span>
+                        <span class="receipt-amount">$<?= number_format((float)$item['line_total'], 2) ?></span>
                     </div>
-                </div>
-            
-                <div class="d-flex align-items-center">
-                    <img src="<?= htmlspecialchars($qrUrl) ?>" alt="QR" class="receipt-qr">
+                <?php endforeach; ?>
+            </div>
+
+            <div class="receipt-box-section">
+                <div class="section-title">Delivery</div>
+                <div class="receipt-simple-row">
+                    <span><span class="label-col">&#x178A;&#x17B9;&#x1780;&#x178A;&#x17C4;&#x1799;:</span> <span class="value-col"><?= htmlspecialchars($order['delivery_type_name'] ?: '-') ?></span></span>
+                    <?php if ($costLabel !== ''): ?>
+                    <span><span class="label-col">&#x178F;&#x1798;&#x17D2;&#x179B;&#x17C3;&#x178A;&#x17B9;&#x1780;:</span> <span class="value-col"><?= htmlspecialchars($costLabel) ?></span></span>
+                    <?php endif; ?>
                 </div>
             </div>
 
-            <div class="section-divider"></div>
-            <div class="section-title mb-1">Customer</div>
-            <div class="row small mb-1">
-                <div class="col-4 label-col">Name</div>
-                <div class="col-8 value-col"><?= htmlspecialchars($order['customer_name']) ?></div>
-            </div>
-            <?php if (!empty($order['phone'])): ?>
-            <div class="row small mb-1">
-                <div class="col-4 label-col">Phone</div>
-                <div class="col-8 value-col"><?= htmlspecialchars($order['phone']) ?></div>
-            </div>
-            <?php endif; ?>
-            <?php if (!empty($order['location'])): ?>
-            <div class="row small mb-1">
-                <div class="col-4 label-col" style="font-size:16px; font-family: var(--receipt-font-khmer);">&#x1791;&#x17B8;&#x178F;&#x17B6;&#x17C6;&#x1784;</div>
-                <div class="col-8 value-col" style="font-size:16px; font-family: var(--receipt-font-khmer);"><?= htmlspecialchars($order['location']) ?></div>
-            </div>
-            <?php endif; ?>
-
-            <div class="section-divider"></div>
-            <div class="section-title mb-1">Products</div>
-            <?php foreach ($receiptDisplayItems as $item): ?>
-                <?php if (($item['display_kind'] ?? '') === 'lucky_merged'): ?>
-                <div class="d-flex justify-content-between small mb-1 align-items-start">
-                    <div class="value-col flex-grow-1 me-2" style="font-size:16px;">Lucky box x <?= (int)$item['quantity'] ?></div>
-                    <div class="value-col amount-col" style="font-size:14px; align-self: flex-start;">$<?= number_format((float)$item['line_total'], 2) ?></div>
+            <div class="receipt-box-section">
+                <div class="section-title">Payment</div>
+                <div class="receipt-payment-line">
+                    <span><span class="label-col">Status:</span> <span class="value-col"><?= strtoupper($order['status']) ?></span></span>
+                    <?php if (!empty($order['payment_method'])): ?>
+                    <span><span class="label-col">Payment:</span> <span class="value-col"><?= htmlspecialchars($order['payment_method']) ?></span></span>
+                    <?php endif; ?>
                 </div>
-                <?php else: ?>
-                <div class="d-flex justify-content-between small mb-1">
-                    <div class="value-col flex-grow-1 me-2" style="font-size:16px; font-family: var(--receipt-font-khmer);"><?= htmlspecialchars($item['product_name']) ?> x <?= (int)$item['quantity'] ?></div>
-                    <div class="value-col amount-col" style="font-size:14px;">$<?= number_format((float)$item['line_total'], 2) ?></div>
+                <?php if ($order['status'] === 'paid' && !empty($order['paid_note'])): ?>
+                <div class="receipt-note"><span class="label-col">Note</span><br><?= htmlspecialchars($order['paid_note']) ?></div>
+                <?php endif; ?>
+            </div>
+
+            <div class="receipt-box-section">
+                <?php if ((float)$order['discount'] > 0): ?>
+                <div class="receipt-total-line">
+                    <span class="label-col">Discount</span>
+                    <span class="receipt-amount">$<?= number_format((float)$order['discount'], 2) ?></span>
                 </div>
                 <?php endif; ?>
-            <?php endforeach; ?>
-            <div class="section-divider"></div>
-            <div class="section-title mb-1">Delivery</div>
-            <?php if (!empty($order['delivery_type_name'])): ?>
-            <div class="row small mb-1">
-                <div class="col-4 label-col" style="font-size:14px; font-family: var(--receipt-font-khmer);">&#x178A;&#x17B9;&#x1780;&#x178A;&#x17C4;&#x1799;</div>
-                <div class="col-8 value-col" style="font-size:14px; font-family: var(--receipt-font-khmer);"><?= htmlspecialchars($order['delivery_type_name']) ?></div>
+                <div class="receipt-total-line">
+                    <span class="label-col">Total</span>
+                    <span class="receipt-amount receipt-grand">$<?= number_format($order['total_amount'], 2) ?></span>
+                </div>
+                <div class="receipt-total-line">
+                    <span class="label-col">&#x179B;&#x17BB;&#x1799;&#x1781;&#x17D2;&#x1798;&#x17C2;&#x179A;</span>
+                    <span class="receipt-amount receipt-grand">&#x17DB;<?= number_format($order['total_amount'] * $exchangeRate, 0) ?></span>
+                </div>
             </div>
-            <?php endif; ?>
-            <?php
-            $costLabel = $order['delivery_cost_label'] ?? '';
-            if ($costLabel === '' && isset($order['delivery_cost_amount']) && $order['delivery_cost_amount'] !== null) {
-                $costLabel = '$' . number_format($order['delivery_cost_amount'], 2);
-            }
-            ?>
-            <?php if ($costLabel !== ''): ?>
-            <div class="row small mb-1">
-                <div class="col-4 label-col" style="font-size:14px; font-family: var(--receipt-font-khmer);">&#x178F;&#x1798;&#x17D2;&#x179B;&#x17C3;&#x178A;&#x17B9;&#x1780;</div>
-                <div class="col-8 value-col" style="font-size:14px; font-family: var(--receipt-font-khmer);"><?= htmlspecialchars($costLabel) ?></div>
-            </div>
-            <?php endif; ?>
 
-            <div class="section-divider"></div>
-            <div class="row small mb-1">
-                <div class="col-4 label-col" style="font-size:18px;">Status</div>
-                <div class="col-8 value-col"><?= strtoupper($order['status']) ?></div>
-            </div>
-            <?php if (!empty($order['payment_method'])): ?>
-            <div class="row small mb-1">
-                <div class="col-4 label-col" style="font-size:15px;">Payment</div>
-                <div class="col-8 value-col" style="font-size:14px;"><?= htmlspecialchars($order['payment_method']) ?></div>
-            </div>
-            <?php endif; ?>
-            <?php if ($order['status'] === 'paid' && !empty($order['paid_note'])): ?>
-            <div class="row small mb-1">
-                <div class="col-4 label-col" style="font-size:15px;">Note</div>
-                <div class="col-8 value-col" style="font-size:12px; font-family: var(--receipt-font-khmer);"><?= htmlspecialchars($order['paid_note']) ?></div>
-            </div>
-            <?php endif; ?>
-
-            <div class="section-divider"></div>
-            <div class="section-title mb-1">Summary</div>
-            <?php if ((float)$order['discount'] > 0): ?>
-            <div class="d-flex justify-content-between align-items-center mb-1">
-                <div class="label-col">Discount</div>
-                <div class="value-col amount-col">$<?= number_format((float)$order['discount'], 2) ?></div>
-            </div>
-            <?php endif; ?>
-            <div class="d-flex justify-content-between align-items-center mb-1">
-                <div class="label-col">Total</div>
-                <div class="fw-bold amount-col" style="font-size:20px; color:black;">$<?= number_format($order['total_amount'], 2) ?></div>
-            </div>
-            <div class="d-flex justify-content-between align-items-center mb-1">
-                <div class="label-col" style="font-family: var(--receipt-font-khmer);">&#x179B;&#x17BB;&#x1799;&#x1781;&#x17D2;&#x1798;&#x17C2;&#x179A;</div>
-                <div class="fw-bold amount-col" style="font-size:20px; color:black;font-family: var(--receipt-font-khmer);">&#x17DB;<?= number_format($order['total_amount'] * $exchangeRate, 0) ?></div>
-            </div>
-                <div class="label-col" style="font-size:14px; font-family: var(--receipt-font-khmer);">Exchange Rate: 1 USD = <?= number_format($exchangeRate, 0) ?>&#x179A;&#x17C0;&#x179B;</div>
-                <div class="section-divider"></div>
+            <div class="receipt-box-section">
                 <?php if (!empty($order['page_name'])): ?>
-                    <div><span class="label-col"style="font-size:16px;">Page:</span> <span class="value-col" style="font-size:14px; font-family: var(--receipt-font-khmer);"><?= htmlspecialchars($order['page_name']) ?></span></div>
+                <div class="receipt-meta-line"><span class="label-col">Page:</span><span class="receipt-meta-value"><?= htmlspecialchars($order['page_name']) ?></span></div>
                 <?php endif; ?>
-                <div class="small mb-0" style="color:black; font-weight: 600;">Created: <?= htmlspecialchars($order['created_at']) ?></div>
-                <div class="label-col"style="font-size:14px;">Powered by : One Night Solution</div>
-                <div class="thermal-cut-feed" aria-hidden="true"></div>
+                <div class="receipt-meta-line"><span class="label-col">Exchange Rate:</span><span class="receipt-meta-value">1 USD = <?= number_format($exchangeRate, 0) ?>&#x179A;&#x17C0;&#x179B;</span></div>
+                <div class="receipt-meta-line"><span class="label-col">Created:</span><span class="receipt-meta-value"><?= htmlspecialchars($order['created_at']) ?></span></div>
+            </div>
+
+            <div class="receipt-footer">Powered by: One Night Solution</div>
+            <div class="thermal-cut-feed" aria-hidden="true"></div>
             </div><!-- /#receiptContent -->
         </div>
     </div>

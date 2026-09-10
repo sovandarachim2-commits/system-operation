@@ -4,7 +4,7 @@
 
 // Database settings
 $DB_HOST = 'localhost';
-$DB_NAME = 'report system';
+$DB_NAME = 'u623004828_muru';
 $DB_USER = 'root';
 $DB_PASS = '';
 
