@@ -236,6 +236,14 @@ try {
             WHERE id = ?
         ");
         $stmt->execute([$reason, (int)$user['id'], (int)$orderId]);
+
+        try {
+            require_once __DIR__ . '/../../helpers.php';
+            send_order_cancel_telegram($pdo, (int)$orderId, $reason);
+        } catch (Throwable $e) {
+            error_log('online_sale_order_action Telegram cancel warning: ' . $e->getMessage());
+        }
+
         $message = 'Order cancelled successfully.';
     }
     try {

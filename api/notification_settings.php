@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/inventory_common.php';
+require_once __DIR__ . '/../user_activity_lib.php';
 
 $pdo = get_db_connection();
 $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));

@@ -11,7 +11,7 @@ if (!is_array($allowedOrigins)) {
 if (in_array($origin, $allowedOrigins, true)) {
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Access-Control-Allow-Credentials: true');
-    header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, Accept, Cache-Control, Authorization, X-Report-Token');
+    header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, Accept, Cache-Control, Authorization, X-Report-Token, X-Frontend-URL');
     header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
     header('Vary: Origin');
 }
