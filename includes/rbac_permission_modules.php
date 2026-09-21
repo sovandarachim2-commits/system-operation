@@ -212,6 +212,8 @@ function rbac_system_report_modules(): array
             ['resource' => 'sr_inventory_transfer', 'label' => 'Stock Transfer', 'actions' => ['view', 'create']],
             ['resource' => 'sr_inventory_delivery_notes', 'label' => 'Delivery Note Report', 'actions' => ['view', 'update', 'delete']],
             ['resource' => 'sr_inventory_closing', 'label' => 'Stock Closing', 'actions' => ['view', 'create', 'update', 'delete', 'approve']],
+            ['resource' => 'sr_inventory_eom_closing', 'label' => 'EOM Closing', 'actions' => ['view', 'create', 'update', 'delete', 'approve']],
+            ['resource' => 'storage_locations', 'label' => 'Storage Locations', 'actions' => ['view', 'create', 'update', 'delete']],
         ],
         'Return' => [
             ['resource' => 'sr_return_report', 'label' => 'Return Report', 'actions' => ['view']],
@@ -222,8 +224,12 @@ function rbac_system_report_modules(): array
             ['resource' => 'sr_bank_balances', 'label' => 'Bank Balances', 'actions' => ['view', 'create', 'update', 'delete']],
             ['resource' => 'sr_month_end_closing', 'label' => 'Month-End Closing', 'actions' => ['view', 'update', 'approve', 'close']],
         ],
+        'Accountant' => [
+            ['resource' => 'commission_sales', 'label' => 'Commission', 'actions' => ['view', 'create', 'update', 'delete']],
+        ],
         'Offline Management' => [
             ['resource' => 'sr_daily_offline_sale', 'label' => 'Offline Sales Report', 'actions' => ['view']],
+            ['resource' => 'sr_offline_team_performance', 'label' => 'Team Management', 'actions' => ['view', 'create', 'update', 'delete']],
             ['resource' => 'sr_offline_buy_report', 'label' => 'Offline Buy Report', 'actions' => ['view']],
         ],
         'Online Management' => [
