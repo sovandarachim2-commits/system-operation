@@ -39,6 +39,15 @@ const NOTIFICATION_MODULES = [
         'event_label' => 'Notify when request is created',
         'test_message' => "Marketing test notification",
     ],
+    'login_notification' => [
+        'label' => 'Login Notification',
+        'description' => 'Alert on login success and failed attempts.',
+        'prefix' => 'notification_login_telegram',
+        'event_keys' => ['notify_login_success', 'notify_login_failed'],
+        'event_key' => 'notify_login_success',
+        'event_label' => 'Notify on login events',
+        'test_message' => "Login Notification test notification",
+    ],
 ];
 
 function notification_settings_ensure_table(PDO $pdo): void
@@ -85,7 +94,7 @@ function notification_settings_read_module(PDO $pdo, string $moduleKey): array
     $module = notification_settings_module_config($moduleKey);
     $prefix = $module['prefix'];
     $eventKey = $module['event_key'];
-    return [
+    $result = [
         'key' => $moduleKey,
         'label' => $module['label'],
         'description' => $module['description'],
@@ -97,6 +106,14 @@ function notification_settings_read_module(PDO $pdo, string $moduleKey): array
         'thread_id' => notification_settings_get($pdo, $prefix . '_thread_id', ''),
         $eventKey => notification_settings_get($pdo, $prefix . '_' . $eventKey, '1') !== '0',
     ];
+    if (!empty($module['event_keys']) && is_array($module['event_keys'])) {
+        foreach ($module['event_keys'] as $ek) {
+            if ($ek !== $eventKey) {
+                $result[$ek] = notification_settings_get($pdo, $prefix . '_' . $ek, '1') !== '0';
+            }
+        }
+    }
+    return $result;
 }
 
 function notification_settings_save_module(PDO $pdo, string $moduleKey, array $payload): array
@@ -109,6 +126,13 @@ function notification_settings_save_module(PDO $pdo, string $moduleKey, array $p
     notification_settings_set($pdo, $prefix . '_chat_id', inventory_api_str($payload['chat_id'] ?? ''));
     notification_settings_set($pdo, $prefix . '_thread_id', inventory_api_str($payload['thread_id'] ?? ''));
     notification_settings_set($pdo, $prefix . '_' . $eventKey, array_key_exists($eventKey, $payload) && empty($payload[$eventKey]) ? '0' : '1');
+    if (!empty($module['event_keys']) && is_array($module['event_keys'])) {
+        foreach ($module['event_keys'] as $ek) {
+            if ($ek !== $eventKey) {
+                notification_settings_set($pdo, $prefix . '_' . $ek, array_key_exists($ek, $payload) && empty($payload[$ek]) ? '0' : '1');
+            }
+        }
+    }
     return notification_settings_read_module($pdo, $moduleKey);
 }
 
@@ -161,27 +185,72 @@ try {
 
         if ($action === 'test') {
             $module = notification_settings_module_config($moduleKey);
+            
+            // Prioritize request parameters for testing so users can test before saving
+            $botToken = inventory_api_str($payload['bot_token'] ?? '');
+            $chatId = inventory_api_str($payload['chat_id'] ?? '');
+            $threadRaw = inventory_api_str($payload['thread_id'] ?? '');
+            
+            // Fallback to saved settings if not provided in request
             $settings = notification_settings_read_module($pdo, $moduleKey);
-            $botToken = notification_settings_bot_token($moduleKey, $settings);
-            $chatId = trim((string)($settings['chat_id'] ?? ''));
+            if ($botToken === '') {
+                $botToken = notification_settings_bot_token($moduleKey, $settings);
+            }
+            if ($chatId === '') {
+                $chatId = trim((string)($settings['chat_id'] ?? ''));
+            }
+            if ($threadRaw === '') {
+                $threadRaw = trim((string)($settings['thread_id'] ?? ''));
+            }
+
             if ($botToken === '') {
                 throw new InvalidArgumentException('Telegram bot token is not configured.');
             }
             if ($chatId === '') {
                 throw new InvalidArgumentException('Telegram Chat ID is required.');
             }
-            $threadRaw = trim((string)($settings['thread_id'] ?? ''));
+            
             $threadId = $threadRaw !== '' ? (int)$threadRaw : null;
-            $text = (string)$module['test_message'] . "\nSent from System Report Notification Settings.";
+            
+            if ($moduleKey === 'login_notification') {
+                $statusIcon = '✅';
+                $statusText = 'LOGIN TEST';
+                $datetime = date('Y-m-d H:i:s');
+                $ip = user_activity_client_ip() ?? '127.0.0.1';
+                $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+                $device = user_activity_device_label_from_parse(user_activity_device_parse($ua));
+                $frontendUrl = isset($_SERVER['HTTP_X_FRONTEND_URL']) ? trim((string)$_SERVER['HTTP_X_FRONTEND_URL']) : 'http://localhost/OrderShadow';
+
+                $text = "{$statusIcon} *{$statusText}*\n";
+                $text .= "👤 User: `Test User`\n";
+                $text .= "📅 Time: `{$datetime}`\n";
+                $text .= "🌐 IP: `{$ip}`\n";
+                $text .= "📱 Device: `{$device}`\n";
+                $text .= "🔗 URL: `{$frontendUrl}`\n";
+                $text .= "\n_Sent from System Report Notification Settings._";
+            } else {
+                $text = "🔔 *TEST NOTIFICATION*\n";
+                $text .= "📦 Module: `{$module['label']}`\n";
+                $text .= "💬 Message: `{$module['test_message']}`\n";
+                $text .= "\n_Sent from System Report Notification Settings._";
+            }
+            
             $result = telegram_send_message_request($botToken, $chatId, $text, $threadId);
+            
             if (empty($result['ok'])) {
                 $decoded = is_array($result['decoded'] ?? null) ? $result['decoded'] : [];
-                throw new RuntimeException('Telegram test failed: ' . (string)($decoded['description'] ?? 'Unknown error'));
+                $errorMsg = (string)($decoded['description'] ?? 'Unknown Telegram error');
+                api_json([
+                    'success' => false,
+                    'message' => 'Telegram test failed: ' . $errorMsg,
+                    'debug' => $decoded
+                ]);
             }
+            
             api_json([
                 'success' => true,
                 'notification' => ['ok' => true],
-                'message' => $settings['label'] . ' test notification sent.',
+                'message' => $module['label'] . ' test notification sent.',
             ]);
         }
 

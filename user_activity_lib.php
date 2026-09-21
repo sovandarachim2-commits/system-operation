@@ -21,6 +21,7 @@ function user_activity_ensure_table(PDO $pdo): void
             device_model VARCHAR(128) NULL,
             user_agent VARCHAR(512) NULL,
             request_uri VARCHAR(512) NULL,
+            frontend_url VARCHAR(512) NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_user_created (user_id, created_at),
             INDEX idx_created (created_at),
@@ -58,6 +59,14 @@ function user_activity_ensure_table(PDO $pdo): void
         }
     } catch (Throwable $e) {
         error_log('user_activity_ensure_table device_model: ' . $e->getMessage());
+    }
+    try {
+        $chk = $pdo->query("SHOW COLUMNS FROM user_activity_log LIKE 'frontend_url'");
+        if ($chk && !$chk->fetch(PDO::FETCH_ASSOC)) {
+            $pdo->exec('ALTER TABLE user_activity_log ADD COLUMN frontend_url VARCHAR(512) NULL AFTER request_uri');
+        }
+    } catch (Throwable $e) {
+        error_log('user_activity_ensure_table frontend_url: ' . $e->getMessage());
     }
 }
 
@@ -202,9 +211,9 @@ function user_activity_iphone_marketing_name(string $hwId): ?string
 }
 
 /**
- * Parse UA (+ optional Client Hints) into device/model name and OS line (no " · " join).
+ * Parse UA (+ optional Client Hints) into device type, OS, model name, and model code.
  *
- * @return array{name: string|null, os: string|null}
+ * @return array{device_type: string|null, os: string|null, model_name: string|null, model_code: string|null}
  */
 function user_activity_device_parse(?string $ua): array
 {
@@ -213,100 +222,195 @@ function user_activity_device_parse(?string $ua): array
         $chModel = '';
     }
 
+    $result = ['device_type' => null, 'os' => null, 'model_name' => null, 'model_code' => null];
+
     if ($ua === null || $ua === '') {
         if ($chModel !== '') {
-            return ['name' => substr($chModel, 0, 128), 'os' => null];
+            $result['model_code'] = substr($chModel, 0, 128);
         }
-        return ['name' => null, 'os' => null];
+        return $result;
     }
 
+    // ── iPhone ────────────────────────────────────────────────────────
     if (stripos($ua, 'iPhone') !== false && stripos($ua, 'iPad') === false) {
-        $ios = null;
+        $result['device_type'] = 'iPhone';
         if (preg_match('/CPU iPhone OS ([\d_]+)/i', $ua, $m)) {
-            $ios = str_replace('_', '.', $m[1]);
+            $result['os'] = 'iOS ' . str_replace('_', '.', $m[1]);
         }
-        $name = 'iPhone';
         if (preg_match('/iPhone(\d+,\d+)/i', $ua, $mh)) {
             $hw = $mh[1];
-            $marketing = user_activity_iphone_marketing_name($hw);
-            $name = $marketing ?? ('iPhone (' . $hw . ')');
+            $result['model_code'] = 'iPhone' . $hw;
+            $result['model_name'] = user_activity_iphone_marketing_name($hw);
         } elseif ($chModel !== '' && strcasecmp($chModel, 'iPhone') !== 0) {
-            $name = substr($chModel, 0, 80);
+            $result['model_code'] = substr($chModel, 0, 128);
         }
-        $os = $ios !== null ? 'iOS ' . $ios : null;
-        return ['name' => substr($name, 0, 128), 'os' => $os];
+        return $result;
     }
 
+    // ── iPad ──────────────────────────────────────────────────────────
     if (stripos($ua, 'iPad') !== false) {
-        $ver = null;
+        $result['device_type'] = 'iPad';
         if (preg_match('/CPU(?: iPhone)? OS ([\d_]+)/i', $ua, $m)) {
-            $ver = str_replace('_', '.', $m[1]);
+            $result['os'] = 'iPadOS ' . str_replace('_', '.', $m[1]);
         }
-        $name = '';
-        if ($chModel !== '' && stripos($chModel, 'iPad') === false) {
-            $name = substr($chModel, 0, 80) . ' · ';
+        if (preg_match('/iPad(\d+,\d+)/i', $ua, $mh)) {
+            $hw = $mh[1];
+            $result['model_code'] = 'iPad' . $hw;
+        } elseif ($chModel !== '' && stripos($chModel, 'iPad') === false) {
+            $result['model_code'] = substr($chModel, 0, 128);
         }
-        $name .= 'iPad';
-        $os = $ver !== null ? 'iPadOS ' . $ver : null;
-        return ['name' => substr($name, 0, 128), 'os' => $os];
+        return $result;
     }
 
+    // ── Android ───────────────────────────────────────────────────────
     if (stripos($ua, 'Android') !== false) {
-        $ver = null;
+        $result['device_type'] = 'Android Phone';
         if (preg_match('/Android\s+([\d.]+)/i', $ua, $av)) {
-            $ver = $av[1];
+            $result['os'] = 'Android ' . $av[1];
         }
-        $model = null;
+        // Detect tablet
+        if (preg_match('/\b(Tablet|Pad|Nexus\s*(?:7|9|10)|SM-T\d{3,}|Lenovo\s*Tab|Pixel\s*C)\b/i', $ua)) {
+            $result['device_type'] = 'Tablet';
+        }
+        // Extract model code from Build string
+        $modelCode = null;
         if (preg_match('/Android\s+[\d.]+;\s*([^;)]+?)(?:\s+Build|\))/i', $ua, $mm)) {
             $model = trim(preg_replace('/\s+/', ' ', $mm[1]));
-            if (stripos($model, 'Linux') === 0) {
-                $model = null;
+            if (stripos($model, 'Linux') !== 0 && $model !== '') {
+                $modelCode = $model;
             }
         }
-        if ($model === null || $model === '') {
-            $model = $chModel !== '' ? $chModel : 'Android device';
+        if ($modelCode === null && $chModel !== '') {
+            $modelCode = $chModel;
         }
-        $os = !empty($ver) ? 'Android ' . $ver : null;
-        return ['name' => substr($model, 0, 128), 'os' => $os];
+        if ($modelCode !== null) {
+            $result['model_code'] = substr($modelCode, 0, 128);
+            $result['model_name'] = user_activity_android_model_name($modelCode);
+        }
+        return $result;
     }
 
+    // ── Windows ───────────────────────────────────────────────────────
     if (preg_match('/Windows NT ([\d.]+)/i', $ua, $w)) {
-        return ['name' => 'Windows PC', 'os' => 'Windows ' . $w[1]];
-    }
-    if (stripos($ua, 'Mac OS X') !== false || stripos($ua, 'Macintosh') !== false) {
-        return ['name' => 'Mac', 'os' => 'macOS'];
-    }
-    if (stripos($ua, 'CrOS') !== false) {
-        return ['name' => 'Chromebook', 'os' => 'Chrome OS'];
-    }
-    if (stripos($ua, 'Linux') !== false && stripos($ua, 'Android') === false) {
-        return ['name' => 'Linux PC', 'os' => 'Linux'];
+        $result['device_type'] = 'Windows PC';
+        $result['os'] = 'Windows ' . $w[1];
+        return $result;
     }
 
-    if ($chModel !== '') {
-        return ['name' => substr($chModel, 0, 128), 'os' => null];
+    // ── macOS ─────────────────────────────────────────────────────────
+    if (stripos($ua, 'Mac OS X') !== false || stripos($ua, 'Macintosh') !== false) {
+        $result['device_type'] = 'Mac';
+        $result['os'] = 'macOS';
+        if (preg_match('/Mac OS X ([\d_]+)/i', $ua, $mm)) {
+            $ver = str_replace('_', '.', $mm[1]);
+            $result['os'] = 'macOS ' . $ver;
+        }
+        return $result;
     }
-    return ['name' => 'Computer', 'os' => null];
+
+    // ── Chrome OS ─────────────────────────────────────────────────────
+    if (stripos($ua, 'CrOS') !== false) {
+        $result['device_type'] = 'Chromebook';
+        $result['os'] = 'Chrome OS';
+        return $result;
+    }
+
+    // ── Linux ─────────────────────────────────────────────────────────
+    if (stripos($ua, 'Linux') !== false && stripos($ua, 'Android') === false) {
+        $result['device_type'] = 'Linux PC';
+        $result['os'] = 'Linux';
+        return $result;
+    }
+
+    // ── Fallback ──────────────────────────────────────────────────────
+    if ($chModel !== '') {
+        $result['model_code'] = substr($chModel, 0, 128);
+    }
+    return $result;
+}
+
+/**
+ * Map Android Build model identifier to a human-readable marketing name.
+ * Returns null when the model cannot be reliably identified.
+ */
+function user_activity_android_model_name(string $modelCode): ?string
+{
+    static $map = [
+        // Samsung Galaxy
+        'SM-S928B' => 'Samsung Galaxy S24 Ultra', 'SM-S926B' => 'Samsung Galaxy S24+', 'SM-S921B' => 'Samsung Galaxy S24',
+        'SM-S928U' => 'Samsung Galaxy S24 Ultra', 'SM-S926U' => 'Samsung Galaxy S24+', 'SM-S921U' => 'Samsung Galaxy S24',
+        'SM-S918B' => 'Samsung Galaxy S23 Ultra', 'SM-S916B' => 'Samsung Galaxy S23+', 'SM-S911B' => 'Samsung Galaxy S23',
+        'SM-S908B' => 'Samsung Galaxy S22 Ultra', 'SM-S906B' => 'Samsung Galaxy S22+', 'SM-S901B' => 'Samsung Galaxy S22',
+        'SM-S918U' => 'Samsung Galaxy S23 Ultra', 'SM-S908U' => 'Samsung Galaxy S22 Ultra',
+        'SM-A556B' => 'Samsung Galaxy A55', 'SM-A546B' => 'Samsung Galaxy A54', 'SM-A536B' => 'Samsung Galaxy A53',
+        'SM-A356B' => 'Samsung Galaxy A35', 'SM-A346B' => 'Samsung Galaxy A34', 'SM-A336B' => 'Samsung Galaxy A33',
+        'SM-A256B' => 'Samsung Galaxy A25', 'SM-A156B' => 'Samsung Galaxy A15', 'SM-A056F' => 'Samsung Galaxy A05',
+        // Google Pixel
+        'tokay' => 'Google Pixel 9 Pro', 'caiman' => 'Google Pixel 9', 'shiba' => 'Google Pixel 8 Pro', 'husky' => 'Google Pixel 8',
+        'panther' => 'Google Pixel 7 Pro', 'cheetah' => 'Google Pixel 7', 'bluejay' => 'Google Pixel 6 Pro', 'raven' => 'Google Pixel 6 Pro',
+        'oriole' => 'Google Pixel 6', 'bramble' => 'Google Pixel 5a', 'sunfish' => 'Google Pixel 4a',
+        'Pixel 9 Pro Fold' => 'Google Pixel 9 Pro Fold', 'Pixel 9 Pro XL' => 'Google Pixel 9 Pro XL',
+        'Pixel 9 Pro' => 'Google Pixel 9 Pro', 'Pixel 9' => 'Google Pixel 9',
+        'Pixel 8 Pro' => 'Google Pixel 8 Pro', 'Pixel 8a' => 'Google Pixel 8a', 'Pixel 8' => 'Google Pixel 8',
+        'Pixel 7 Pro' => 'Google Pixel 7 Pro', 'Pixel 7a' => 'Google Pixel 7a', 'Pixel 7' => 'Google Pixel 7',
+        'Pixel 6 Pro' => 'Google Pixel 6 Pro', 'Pixel 6a' => 'Google Pixel 6a', 'Pixel 6' => 'Google Pixel 6',
+        'Pixel 5' => 'Google Pixel 5', 'Pixel 4a (5G)' => 'Google Pixel 4a (5G)', 'Pixel 4a' => 'Google Pixel 4a', 'Pixel 4 XL' => 'Google Pixel 4 XL', 'Pixel 4' => 'Google Pixel 4',
+        // OnePlus
+        'CPH2583' => 'OnePlus 12', 'CPH2573' => 'OnePlus 12', 'PHZ110' => 'OnePlus 12',
+        'CPH2451' => 'OnePlus 11', 'PHB110' => 'OnePlus 11',
+        'CPH2415' => 'OnePlus Nord 3', 'CPH2399' => 'OnePlus Nord CE 3',
+        // Xiaomi
+        '23116PN5BC' => 'Xiaomi 14', '2210132C' => 'Xiaomi 12T Pro', '2107113SG' => 'Xiaomi 11T Pro',
+        'M2012K11AC' => 'Xiaomi 11', 'M2011K2G' => 'Xiaomi 11T',
+        'Redmi Note 13 Pro' => 'Xiaomi Redmi Note 13 Pro', 'Redmi Note 12 Pro' => 'Xiaomi Redmi Note 12 Pro',
+        'Redmi Note 11 Pro' => 'Xiaomi Redmi Note 11 Pro',
+        // Huawei
+        'OCE-AN10' => 'Huawei P60 Pro', 'LIO-AN00' => 'Huawei Mate 40 Pro', 'NOH-AN00' => 'Huawei P50 Pro',
+        // Oppo
+        'CPH2513' => 'OPPO Find X7', 'CPH2451' => 'OPPO Find X6', 'CPH2373' => 'OPPO Reno 10 Pro',
+        // Vivo
+        'V2254A' => 'vivo X100 Pro', 'V2145A' => 'vivo X80 Pro',
+        // Nothing
+        'A065' => 'Nothing Phone (2)', 'A063' => 'Nothing Phone (1)',
+        // Sony
+        'XQ-DC72' => 'Sony Xperia 1 V', 'XQ-BQ42' => 'Sony Xperia 1 IV',
+        // Motorola
+        'moto g84' => 'Motorola Moto G84', 'moto g54' => 'Motorola Moto G54',
+        // Nokia
+        'Nokia G42' => 'Nokia G42', 'Nokia G22' => 'Nokia G22',
+        // ASUS
+        'ASUS_I005DA' => 'ASUS ROG Phone 7', 'ASUS_Z017DC' => 'ASUS ROG Phone 5',
+    ];
+
+    $normalized = preg_replace('/\s+/', ' ', trim($modelCode));
+    if (isset($map[$normalized])) {
+        return $map[$normalized];
+    }
+    if (isset($map[strtoupper($normalized)])) {
+        return $map[strtoupper($normalized)];
+    }
+    return null;
 }
 
 function user_activity_device_label_from_parse(array $parsed): ?string
 {
-    $name = isset($parsed['name']) && $parsed['name'] !== '' ? (string)$parsed['name'] : null;
+    $type = isset($parsed['device_type']) && $parsed['device_type'] !== '' ? (string)$parsed['device_type'] : null;
     $os = isset($parsed['os']) && $parsed['os'] !== '' ? (string)$parsed['os'] : null;
-    if ($name === null && $os === null) {
+    if ($type === null && $os === null) {
         return null;
     }
-    if ($name === null) {
+    if ($type === null) {
         return substr($os, 0, 128);
     }
     if ($os === null) {
-        return substr($name, 0, 128);
+        return substr($type, 0, 128);
     }
-    return substr($name . ' · ' . $os, 0, 128);
+    return substr($type . ' · ' . $os, 0, 128);
 }
 
 /**
- * Human-readable device line: model + OS (stored in user_activity_log.device).
+ * Device type + OS (stored in user_activity_log.device).
+ * e.g. "Android Phone · Android 15", "iPhone · iOS 18", "Windows PC · Windows 11"
  */
 function user_activity_device_label(?string $ua): ?string
 {
@@ -314,102 +418,42 @@ function user_activity_device_label(?string $ua): ?string
 }
 
 /**
- * Friendly model name only, without OS version — e.g. iPhone 16 Pro, iPad (stored in user_activity_log.device_name).
+ * Human-readable model name only (stored in user_activity_log.device_name).
+ * e.g. "Google Pixel 9", "Samsung Galaxy S24 Ultra", "iPhone 16 Pro"
+ * Returns null when model cannot be reliably determined.
  */
 function user_activity_device_name(?string $ua): ?string
 {
     $p = user_activity_device_parse($ua);
-    $n = $p['name'] ?? null;
+    $n = $p['model_name'] ?? null;
     return ($n !== null && $n !== '') ? substr($n, 0, 128) : null;
 }
 
 /**
- * Model code from User-Agent only (no Client Hints): hardware id or device token, not the marketing name.
- * iPhone Safari usually has no hardware id — returns "iPhone" instead of null.
+ * Internal manufacturer model code (stored in user_activity_log.device_model).
+ * e.g. "tokay", "SM-S928B", "iPhone17,2"
+ * Returns null when no reliable model code is available.
  */
 function user_activity_device_model_from_user_agent(?string $ua): ?string
 {
     if ($ua === null || trim((string)$ua) === '') {
         return null;
     }
-    $ua = (string)$ua;
-
-    if (stripos($ua, 'iPhone') !== false && stripos($ua, 'iPad') === false) {
-        if (preg_match('/iPhone(\d+,\d+)/i', $ua, $m)) {
-            return 'iPhone' . $m[1];
-        }
-        return 'iPhone';
-    }
-
-    if (stripos($ua, 'iPad') !== false) {
-        if (preg_match('/iPad(\d+,\d+)/i', $ua, $m)) {
-            return 'iPad' . $m[1];
-        }
-        return 'iPad';
-    }
-
-    if (stripos($ua, 'Android') !== false) {
-        if (preg_match('/Android\s+[\d.]+;\s*([^;)]+?)(?:\s+Build|\))/i', $ua, $mm)) {
-            $model = trim(preg_replace('/\s+/', ' ', $mm[1]));
-            if (stripos($model, 'Linux') === 0) {
-                $model = '';
-            }
-            if ($model !== '') {
-                return substr($model, 0, 128);
-            }
-        }
-        return 'Android device';
-    }
-
-    if (preg_match('/Windows NT ([\d.]+)/i', $ua, $w)) {
-        return 'WinNT ' . $w[1];
-    }
-    if (stripos($ua, 'Mac OS X') !== false || stripos($ua, 'Macintosh') !== false) {
-        if (preg_match('/\bARM Mac OS X\b/i', $ua)) {
-            return 'Mac (Apple silicon)';
-        }
-        if (preg_match('/\bIntel Mac OS X\b/i', $ua)) {
-            return 'Mac (Intel)';
-        }
-        return 'Mac';
-    }
-    if (stripos($ua, 'CrOS') !== false) {
-        return 'Chrome OS';
-    }
-    if (stripos($ua, 'Linux') !== false && stripos($ua, 'Android') === false) {
-        return 'Linux PC';
-    }
-
-    return null;
+    $p = user_activity_device_parse($ua);
+    return $p['model_code'] ?? null;
 }
 
 /**
- * Model code from UA + optional Client Hints (stored in user_activity_log.device_model); not the same as device_name.
+ * Model code from UA + Client Hints (stored in user_activity_log.device_model).
  */
 function user_activity_device_model(?string $ua): ?string
 {
-    $chModel = isset($_SERVER['HTTP_SEC_CH_UA_MODEL']) ? trim((string)$_SERVER['HTTP_SEC_CH_UA_MODEL'], " \t\"") : '';
-    if ($chModel === '' || strcasecmp($chModel, '?0') === 0) {
-        $chModel = '';
-    }
-
-    if ($ua === null || trim((string)$ua) === '') {
-        return $chModel !== '' ? substr($chModel, 0, 128) : null;
-    }
-
-    $fromUa = user_activity_device_model_from_user_agent($ua);
-    if ($fromUa !== null && $fromUa !== '') {
-        if (strcasecmp($fromUa, 'iPhone') === 0 && $chModel !== '' && strcasecmp($chModel, 'iPhone') !== 0) {
-            return substr($chModel, 0, 128);
-        }
-        return $fromUa;
-    }
-
-    return $chModel !== '' ? substr($chModel, 0, 128) : null;
+    return user_activity_device_model_from_user_agent($ua);
 }
 
 /**
  * Prefer stored device_model; if empty (legacy row), derive from saved user_agent.
+ * Returns empty string if no reliable model code is available.
  */
 function user_activity_display_device_model(?string $device_model, ?string $user_agent): string
 {
@@ -423,6 +467,7 @@ function user_activity_display_device_model(?string $device_model, ?string $user
 
 /**
  * Prefer stored device_name; for older rows derive from combined device string.
+ * Returns empty string if no reliable model name is available.
  */
 function user_activity_display_device_name(?string $device_name, ?string $device): string
 {
@@ -434,6 +479,7 @@ function user_activity_display_device_name(?string $device_name, ?string $device
     if ($d === '') {
         return '';
     }
+    // Legacy: try to extract model name from "device · OS" format
     foreach ([' · iOS ', ' · iPadOS ', ' · Android '] as $sep) {
         $p = strpos($d, $sep);
         if ($p !== false) {
@@ -443,7 +489,7 @@ function user_activity_display_device_name(?string $device_name, ?string $device
     if (preg_match('/^(.+?)\s*·\s*Windows\s+[\d.]+/i', $d, $m)) {
         return trim($m[1]);
     }
-    if (preg_match('/^(.+?)\s*·\s*macOS$/i', $d, $m)) {
+    if (preg_match('/^(.+?)\s*·\s*macOS/i', $d, $m)) {
         return trim($m[1]);
     }
     if (preg_match('/^(.+?)\s*·\s*Chrome OS$/i', $d, $m)) {
@@ -463,6 +509,12 @@ function user_activity_display_device_name(?string $device_name, ?string $device
 function user_activity_client_ip(): ?string
 {
     $raw = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+    
+    // Convert IPv6 loopback to IPv4
+    if ($raw === '::1') {
+        return '127.0.0.1';
+    }
+
     if ($raw === '') {
         $xff = trim((string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? ''));
         if ($xff !== '') {
@@ -623,15 +675,26 @@ function user_activity_log(PDO $pdo, ?array $user, string $action, ?string $deta
         $ctxJson = $context !== null ? json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null;
         $ip = user_activity_client_ip();
         $ua = isset($_SERVER['HTTP_USER_AGENT']) ? substr((string)$_SERVER['HTTP_USER_AGENT'], 0, 512) : null;
-        $device = user_activity_device_label($ua);
-        $deviceName = user_activity_device_name($ua);
-        $deviceModel = user_activity_device_model($ua);
+        $parsed = user_activity_device_parse($ua);
+        $device = user_activity_device_label_from_parse($parsed);
+        $deviceName = ($parsed['model_name'] ?? null) !== null ? substr((string)$parsed['model_name'], 0, 128) : null;
+        $deviceModel = ($parsed['model_code'] ?? null) !== null ? substr((string)$parsed['model_code'], 0, 128) : null;
         $uri = isset($_SERVER['REQUEST_URI']) ? substr((string)$_SERVER['REQUEST_URI'], 0, 512) : null;
+        $frontendUrl = isset($_SERVER['HTTP_X_FRONTEND_URL']) ? substr((string)$_SERVER['HTTP_X_FRONTEND_URL'], 0, 512) : null;
+        
+        // For login notifications, fallback to current URL if frontend_url is missing
+        $logUrl = $frontendUrl;
+        if ($logUrl === null || $logUrl === '') {
+            $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https" : "http";
+            $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+            $logUrl = "{$protocol}://{$host}{$uri}";
+        }
+        
         $det = $details !== null && $details !== '' ? substr($details, 0, 500) : null;
 
         $stmt = $pdo->prepare("
-            INSERT INTO user_activity_log (user_id, user_name, action, details, context, ip_address, device, device_name, device_model, user_agent, request_uri)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO user_activity_log (user_id, user_name, action, details, context, ip_address, device, device_name, device_model, user_agent, request_uri, frontend_url)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
         $stmt->execute([
             $uid > 0 ? $uid : null,
@@ -645,9 +708,110 @@ function user_activity_log(PDO $pdo, ?array $user, string $action, ?string $deta
             $deviceModel,
             $ua,
             $uri,
+            $frontendUrl,
         ]);
+
+        // Send Login Notification if configured
+        if ($action === 'login_success' || $action === 'login_failed') {
+            user_activity_send_login_notification($pdo, $user, $action, $ip, $device, $details, $context, $logUrl);
+        }
     } catch (Throwable $e) {
         error_log('user_activity_log: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Send Telegram notification for login events.
+ */
+function user_activity_send_login_notification(PDO $pdo, ?array $user, string $action, ?string $ip, ?string $device, ?string $details, ?array $context, ?string $url = null): void
+{
+    try {
+        // Load settings for login_notification module
+        $prefix = 'notification_login_telegram';
+        
+        $stmt = $pdo->prepare('SELECT `value` FROM app_settings WHERE `key` = ? LIMIT 1');
+        
+        $stmt->execute([$prefix . '_enabled']);
+        if ($stmt->fetchColumn() !== '1') return;
+
+        $isSuccess = ($action === 'login_success');
+        $eventKey = $isSuccess ? 'notify_login_success' : 'notify_login_failed';
+        
+        $stmt->execute([$prefix . '_' . $eventKey]);
+        if ($stmt->fetchColumn() === '0') return;
+
+        $stmt->execute([$prefix . '_bot_token']);
+        $botToken = trim((string)$stmt->fetchColumn());
+        if ($botToken === '') {
+            global $TELEGRAM_BOT_TOKEN;
+            $botToken = trim((string)($TELEGRAM_BOT_TOKEN ?? ''));
+        }
+        
+        $stmt->execute([$prefix . '_chat_id']);
+        $chatId = trim((string)$stmt->fetchColumn());
+        
+        $stmt->execute([$prefix . '_thread_id']);
+        $threadRaw = trim((string)$stmt->fetchColumn());
+        $threadId = $threadRaw !== '' ? (int)$threadRaw : null;
+
+        if ($botToken === '' || $chatId === '') return;
+
+        // Build Message
+        $statusIcon = $isSuccess ? '✅' : '❌';
+        $statusText = $isSuccess ? 'LOGIN SUCCESS' : 'LOGIN FAILED';
+        $datetime = date('Y-m-d H:i:s');
+        
+        $username = trim((string)($user['username'] ?? ($context['username'] ?? '')));
+        if ($username === '' && !$isSuccess && $details) {
+            // Try to extract username from details for failed logins
+            if (preg_match('/username:\s*(\S+)/i', $details, $m)) {
+                $username = $m[1];
+            }
+        }
+        
+        $name = trim((string)($user['name'] ?? ''));
+        $userDisplay = $username;
+        if ($name !== '' && $name !== $username) {
+            $userDisplay .= " ({$name})";
+        }
+
+        $message = "{$statusIcon} *{$statusText}*\n";
+        $message .= "👤 User: `{$userDisplay}`\n";
+        $message .= "📅 Time: `{$datetime}`\n";
+        $message .= "🌐 IP: `{$ip}`\n";
+        $message .= "📱 Device: `{$device}`\n";
+        
+        if ($url !== null && $url !== '') {
+            $message .= "🔗 URL: `{$url}`\n";
+        }
+        
+        if (!$isSuccess) {
+            $message .= "⚠️ Reason: `Invalid credentials`\n";
+        }
+
+        // Use helper if available, else manual curl
+        if (function_exists('telegram_send_message_request')) {
+            telegram_send_message_request($botToken, $chatId, $message, $threadId);
+        } else {
+            $url = "https://api.telegram.org/bot{$botToken}/sendMessage";
+            $postData = [
+                'chat_id' => $chatId,
+                'text' => $message,
+                'parse_mode' => 'Markdown',
+            ];
+            if ($threadId !== null) $postData['message_thread_id'] = $threadId;
+            
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $url);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($postData));
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_exec($ch);
+            curl_close($ch);
+        }
+    } catch (Throwable $e) {
+        error_log('user_activity_send_login_notification: ' . $e->getMessage());
     }
 }
 

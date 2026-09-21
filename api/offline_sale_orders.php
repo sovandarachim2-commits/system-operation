@@ -238,21 +238,7 @@ function offline_api_create_order(PDO $pdo, array $user): void
         $allProductsById[(int)$product['id']] = $product;
     }
 
-    $items = [];
-    foreach ($saleItemsRaw as $raw) {
-        $pid = (int)($raw['product_id'] ?? 0);
-        $qty = offline_api_num($raw['quantity'] ?? 0);
-        $price = offline_api_num($raw['unit_price'] ?? 0);
-        if ($pid <= 0 || $qty <= 0 || !isset($allProductsById[$pid])) {
-            continue;
-        }
-        if (!isset($items[$pid])) {
-            $items[$pid] = $allProductsById[$pid];
-            $items[$pid]['quantity'] = 0.0;
-            $items[$pid]['selling_price'] = max(0, $price);
-        }
-        $items[$pid]['quantity'] += $qty;
-    }
+    $items = offline_sale_items_from_rows($saleItemsRaw, $allProductsById);
     if (!$items) {
         api_error('Add at least one sale product.', 422);
     }
@@ -281,7 +267,7 @@ function offline_api_create_order(PDO $pdo, array $user): void
         $purchaseItems[$key]['quantity'] += $qty;
     }
 
-    foreach ($items as $item) {
+    foreach (offline_sale_stock_totals($items) as $item) {
         $inv = offline_inventory_row($pdo, $locationId, (string)$item['name']);
         if (!$inv || (float)$inv['quantity_on_hand'] + 0.009 < (float)$item['quantity']) {
             api_error('Insufficient offline stock for ' . $item['name'], 422);
@@ -304,7 +290,8 @@ function offline_api_create_order(PDO $pdo, array $user): void
         offline_log_order_activity($pdo, $orderId, 'created', 'Order created', $userId);
 
         $itemStmt = $pdo->prepare("INSERT INTO offline_sale_order_items (order_id, product_id, product_name, quantity, unit_price, line_total, unit_cost) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        foreach ($items as $pid => $item) {
+        foreach ($items as $item) {
+            $pid = (int)$item['id'];
             $qty = (float)$item['quantity'];
             $inv = offline_inventory_row($pdo, $locationId, (string)$item['name']);
             $prev = (float)$inv['quantity_on_hand'];
@@ -404,21 +391,7 @@ function offline_api_update_order(PDO $pdo, array $user): void
         $allProductsById[(int)$product['id']] = $product;
     }
 
-    $items = [];
-    foreach ($saleItemsRaw as $raw) {
-        $pid = (int)($raw['product_id'] ?? 0);
-        $qty = offline_api_num($raw['quantity'] ?? 0);
-        $price = offline_api_num($raw['unit_price'] ?? 0);
-        if ($pid <= 0 || $qty <= 0 || !isset($allProductsById[$pid])) {
-            continue;
-        }
-        if (!isset($items[$pid])) {
-            $items[$pid] = $allProductsById[$pid];
-            $items[$pid]['quantity'] = 0.0;
-            $items[$pid]['selling_price'] = max(0, $price);
-        }
-        $items[$pid]['quantity'] += $qty;
-    }
+    $items = offline_sale_items_from_rows($saleItemsRaw, $allProductsById);
     if (!$items) {
         api_error('Add at least one sale product.', 422);
     }

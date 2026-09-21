@@ -553,6 +553,10 @@ function marketing_list(PDO $pdo, array $filters, int $userId, bool $canViewAll,
         LEFT JOIN users u1 ON mt.created_by = u1.id
         {$productWhereSql}
         GROUP BY p.id, p.name, p.sku
+        HAVING SUM(CASE WHEN mt.status = 'pending_approval' THEN mti.quantity_taken ELSE 0 END) > 0
+            OR (SUM(CASE WHEN mt.status IN ('pending', 'completed') THEN mti.quantity_taken ELSE 0 END)
+                - SUM(CASE WHEN mt.status IN ('pending', 'completed') THEN mti.quantity_returned ELSE 0 END)
+                - SUM(CASE WHEN mt.status IN ('pending', 'completed') THEN mti.quantity_not_returned ELSE 0 END)) > 0
         ORDER BY p.name ASC
     ", $productParams);
 

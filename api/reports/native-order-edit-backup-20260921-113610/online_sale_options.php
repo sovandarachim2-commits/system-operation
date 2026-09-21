@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../bootstrap.php';
 require_once __DIR__ . '/../../helpers.php';
 
-require_role_or_permission(['admin', 'seller'], 'seller_orders.create', 'sr_orders.create', 'seller_orders.update', 'orders.update', 'sr_orders.update');
+require_role_or_permission(['admin', 'seller'], 'seller_orders.create', 'sr_orders.create');
 
 function online_sale_option_rows(PDO $pdo, string $sql, array $params = []): array
 {
@@ -16,14 +16,6 @@ function online_sale_option_rows(PDO $pdo, string $sql, array $params = []): arr
 try {
     $pdo = get_db_connection();
     $currentMonth = date('Y-m');
-    $luckyBoxSql = '0';
-    $luckyColumn = $pdo->query("SHOW COLUMNS FROM product_sets LIKE 'is_lucky_box'");
-    if ($luckyColumn->fetch()) {
-        $luckyBoxSql = "CASE WHEN COALESCE(p.product_type, 'normal') = 'set'
-            AND EXISTS (SELECT 1 FROM product_sets ps WHERE ps.set_name = p.name
-                AND COALESCE(ps.is_lucky_box, 0) = 1)
-            THEN 1 ELSE 0 END";
-    }
 
     api_json([
         'success' => true,
@@ -31,8 +23,7 @@ try {
             'products' => online_sale_option_rows($pdo, "
                 SELECT
                     p.id AS value,
-                    {$luckyBoxSql} AS is_lucky_box,
-                    p.name AS label,
+                    CONCAT(p.name, CASE WHEN p.sku IS NULL OR p.sku = '' THEN '' ELSE CONCAT(' (', p.sku, ')') END) AS label,
                     COALESCE(pc.selling_price, p.cost, 0) AS price,
                     CASE
                         WHEN COALESCE(pc.original_cost, 0) > 0

@@ -88,13 +88,13 @@ try {
                 ORDER BY CASE WHEN value = 'not_delivered' THEN 0 ELSE 1 END, value
                 LIMIT 200
             "),
-            'sellers' => report_option_rows($pdo, "
+            'sellers' => array_merge([['value' => '0', 'label' => 'All Seller']], report_option_rows($pdo, "
                 SELECT id AS value, COALESCE(NULLIF(name, ''), username) AS label
                 FROM users
                 WHERE active = 1
                 ORDER BY label
                 LIMIT 300
-            "),
+            ")),
             'products' => report_option_rows($pdo, "
                 SELECT id AS value, CONCAT(name, CASE WHEN sku IS NULL OR sku = '' THEN '' ELSE CONCAT(' (', sku, ')') END) AS label
                 FROM products

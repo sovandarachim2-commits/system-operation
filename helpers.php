@@ -259,6 +259,7 @@ function send_telegram_message(string $text): void
         $data = [
             'chat_id' => $t['chat_id'],
             'text'    => $text,
+            'parse_mode' => 'Markdown',
         ];
         if (isset($t['thread_id']) && $t['thread_id'] !== null && $t['thread_id'] !== '') {
             $data['message_thread_id'] = (int)$t['thread_id'];
@@ -330,6 +331,9 @@ function telegram_send_message_request(string $botToken, string $chatId, string 
     if (!empty($options['disable_web_page_preview'])) {
         $data['disable_web_page_preview'] = 'true';
     }
+    
+    // Default to Markdown for nice formatting (bold, code blocks)
+    $data['parse_mode'] = $options['parse_mode'] ?? 'Markdown';
 
     $raw = telegram_http_post_form($url, $data);
     if ($raw === null) {

@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../bootstrap.php';
-require_role_or_permission(['admin'], 'sr_sales_dashboard.view', 'sr_financial_summary.view', 'sr_income_statement.view', 'sr_orders.view', 'sr_sold_products.view', 'financial_summary.view', 'daily_summary.view');
+require_role_or_permission(['admin', 'seller'], 'sr_sales_dashboard.view', 'sr_financial_summary.view', 'sr_income_statement.view', 'sr_orders.view', 'sr_sold_products.view', 'financial_summary.view', 'daily_summary.view');
 
 function sales_api_int(string $key, int $default, int $min, int $max): int
 {
@@ -30,7 +30,19 @@ try {
     $from = sales_api_date($_GET['from'] ?? null);
     $to = sales_api_date($_GET['to'] ?? null);
     $branch = trim((string)($_GET['branch'] ?? ''));
-    $sellerId = filter_var($_GET['seller_id'] ?? null, FILTER_VALIDATE_INT);
+    $sellerId = null;
+    if (isset($_GET['seller_id']) && $_GET['seller_id'] !== '') {
+        $sellerId = filter_var($_GET['seller_id'], FILTER_VALIDATE_INT);
+        if ($sellerId === 0) {
+            $sellerId = null;
+        }
+    }
+    if ($sellerId === null && !isset($_GET['seller_id'])) {
+        $currentUser = current_user();
+        if ($currentUser && strtolower(trim((string)($currentUser['role'] ?? ''))) === 'seller') {
+            $sellerId = (int)$currentUser['id'];
+        }
+    }
     $customer = trim((string)($_GET['customer'] ?? ''));
     $payment = strtolower(trim((string)($_GET['payment'] ?? '')));
     $paymentMethod = trim((string)($_GET['payment_method'] ?? ''));

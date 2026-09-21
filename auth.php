@@ -52,7 +52,7 @@ function auth_apply_report_cors(): void
     }
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Access-Control-Allow-Credentials: true');
-    header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, Accept, Cache-Control, Authorization, X-Report-Token');
+    header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, Accept, Cache-Control, Authorization, X-Report-Token, X-Frontend-URL');
     header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
     header('Vary: Origin');
     if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? '')) === 'OPTIONS') {

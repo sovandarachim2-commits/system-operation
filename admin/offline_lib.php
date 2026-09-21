@@ -786,7 +786,7 @@ function offline_add_order_payment(PDO $pdo, int $orderId, string $paymentDate, 
         $orderId,
         'updated',
         sprintf(
-            'Order updated â€” status: %s, paid $%s of $%s',
+            'Order updated — status: %s, paid $%s of $%s',
             (string)($row['status'] ?? ''),
             number_format((float)($row['received_amount'] ?? 0), 2),
             number_format((float)($row['total_amount'] ?? 0), 2)
@@ -1001,8 +1001,77 @@ function offline_order_paid_amount_legacy(array $order): float
     return 0.0;
 }
 
+// Keep differently priced lines separate, including free sale items.
+function offline_sale_items_from_rows(array $rows, array $productsById): array
+{
+    $items = [];
+    foreach ($rows as $raw) {
+        $pid = (int)($raw['product_id'] ?? 0);
+        $qty = (float)($raw['quantity'] ?? 0);
+        $price = (float)($raw['unit_price'] ?? 0);
+        if ($pid <= 0 || !is_finite($qty) || $qty <= 0 || !isset($productsById[$pid])) {
+            continue;
+        }
+        $price = is_finite($price) ? round(max(0, $price), 2) : 0.0;
+        $key = $pid . '|' . number_format($price, 2, '.', '');
+        if (!isset($items[$key])) {
+            $items[$key] = $productsById[$pid];
+            $items[$key]['quantity'] = 0.0;
+            $items[$key]['selling_price'] = $price;
+        }
+        $items[$key]['quantity'] += $qty;
+    }
+    return $items;
+}
+
+// Stock checks must include every price line and apply edit credit only once.
+function offline_sale_stock_totals(array $items): array
+{
+    $totals = [];
+    foreach ($items as $item) {
+        $pid = (int)$item['id'];
+        if (!isset($totals[$pid])) {
+            $totals[$pid] = $item;
+            $totals[$pid]['quantity'] = 0.0;
+        }
+        $totals[$pid]['quantity'] += (float)$item['quantity'];
+    }
+    return $totals;
+}
+
+function offline_order_update_change_summary(array $oldRows, array $items, float $oldDiscount, float $newDiscount, float $oldTotal, float $newTotal): string
+{
+    $old = [];
+    foreach ($oldRows as $row) {
+        $pid = (int)($row['product_id'] ?? 0);
+        if ($pid <= 0) continue;
+        if (!isset($old[$pid])) $old[$pid] = ['name' => (string)($row['product_name'] ?? 'Product'), 'quantity' => 0.0];
+        $old[$pid]['quantity'] += (float)($row['quantity'] ?? 0);
+    }
+    $new = [];
+    foreach ($items as $item) {
+        $pid = (int)($item['id'] ?? 0);
+        if ($pid <= 0) continue;
+        if (!isset($new[$pid])) $new[$pid] = ['name' => (string)($item['name'] ?? 'Product'), 'quantity' => 0.0];
+        $new[$pid]['quantity'] += (float)($item['quantity'] ?? 0);
+    }
+    $changes = [];
+    $qty = static fn(float $value): string => rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
+    foreach (array_unique(array_merge(array_keys($old), array_keys($new))) as $pid) {
+        $before = (float)($old[$pid]['quantity'] ?? 0); $after = (float)($new[$pid]['quantity'] ?? 0);
+        if (abs($before - $after) < 0.0001) continue;
+        $name = $new[$pid]['name'] ?? $old[$pid]['name'] ?? 'Product';
+        if ($before <= 0) $changes[] = "$name: Added (Qty 0 → " . $qty($after) . ')';
+        elseif ($after <= 0) $changes[] = "$name: Removed (Qty " . $qty($before) . ' → 0)';
+        else $changes[] = "$name: Qty " . $qty($before) . ' → ' . $qty($after);
+    }
+    if (abs($oldDiscount - $newDiscount) >= 0.005) $changes[] = 'Discount $' . number_format($oldDiscount, 2) . ' → $' . number_format($newDiscount, 2);
+    if (abs($oldTotal - $newTotal) >= 0.005) $changes[] = 'Total $' . number_format($oldTotal, 2) . ' → $' . number_format($newTotal, 2);
+    return $changes ? implode('; ', $changes) : 'No sale quantity, discount, or total changes';
+}
+
 /**
- * @param array<int, array<string, mixed>> $items keyed by product id
+ * @param array<array-key, array<string, mixed>> $items Sale lines with product id, quantity, and selling_price.
  */
 function offline_update_sale_order(
     PDO $pdo,
@@ -1068,7 +1137,7 @@ function offline_update_sale_order(
     $total = max(0, $subtotal - $discount - $purchaseTotal);
 
     $sameLocation = $oldLocationId > 0 && $oldLocationId === $locationId;
-    foreach ($items as $pid => $item) {
+    foreach (offline_sale_stock_totals($items) as $pid => $item) {
         $qty = (float)$item['quantity'];
         $inv = offline_inventory_row($pdo, $locationId, (string)$item['name']);
         $onHand = $inv ? (float)$inv['quantity_on_hand'] : 0.0;
@@ -1156,7 +1225,8 @@ function offline_update_sale_order(
             INSERT INTO offline_sale_order_items (order_id, product_id, product_name, quantity, unit_price, line_total, unit_cost)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ");
-        foreach ($items as $pid => $item) {
+        foreach ($items as $item) {
+            $pid = (int)$item['id'];
             $qty = (float)$item['quantity'];
             $inv = offline_inventory_row($pdo, $locationId, (string)$item['name']);
             if (!$inv) {
@@ -1242,11 +1312,8 @@ function offline_update_sale_order(
             $pdo,
             $orderId,
             'updated',
-            sprintf(
-                'Order updated â€” %d product(s), discount $%s, total $%s',
-                count($items),
-                number_format($discount, 2),
-                number_format($total, 2)
+            'Order updated — ' . offline_order_update_change_summary(
+                $oldRows, $items, (float)($order['discount'] ?? 0), $discount, (float)($order['total_amount'] ?? 0), $total
             ),
             $userId
         );
@@ -1372,4 +1439,3 @@ function offline_cancel_sale_order(PDO $pdo, int $orderId, ?string $cancelNote, 
         throw $e;
     }
 }
-

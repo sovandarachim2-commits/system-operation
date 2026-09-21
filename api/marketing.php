@@ -136,6 +136,10 @@ function marketing_ensure_columns(PDO $pdo): void
         if (!$stmt || !$stmt->fetch(PDO::FETCH_ASSOC)) {
             $pdo->exec("ALTER TABLE marketing_takes ADD COLUMN images TEXT NULL AFTER notes");
         }
+        $stmt = $pdo->query("SHOW COLUMNS FROM marketing_takes LIKE 'scan_out_invs'");
+        if (!$stmt || !$stmt->fetch(PDO::FETCH_ASSOC)) {
+            $pdo->exec("ALTER TABLE marketing_takes ADD COLUMN scan_out_invs TEXT NULL AFTER images");
+        }
         $pdo->exec("
             CREATE TABLE IF NOT EXISTS marketing_types (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -432,6 +436,7 @@ function marketing_list(PDO $pdo, array $filters, int $userId, bool $canViewAll,
     $marketingTypes = marketing_selected_types($filters['marketing_type'] ?? null);
     $productId = (int)($filters['product_id'] ?? 0);
     $createdBy = (int)($filters['created_by'] ?? 0);
+    $deliveryBy = trim((string)($filters['delivery_by'] ?? ''));
     $q = trim((string)($filters['q'] ?? ''));
 
     $params = [$from, $to];
@@ -460,6 +465,10 @@ function marketing_list(PDO $pdo, array $filters, int $userId, bool $canViewAll,
         $where[] = 'EXISTS (SELECT 1 FROM marketing_take_items mti_filter WHERE mti_filter.marketing_take_id = mt.id AND mti_filter.product_id = ?)';
         $params[] = $productId;
     }
+    if ($deliveryBy !== '') {
+        $where[] = "EXISTS (SELECT 1 FROM out_items oi_filter WHERE FIND_IN_SET(oi_filter.inv, REPLACE(COALESCE(mt.scan_out_invs, ''), ' ', '')) AND oi_filter.delivery_by = ?)";
+        $params[] = $deliveryBy;
+    }
     if ($q !== '') {
         $where[] = '(mt.take_code LIKE ? OR mt.event_name LIKE ? OR mt.marketing_type LIKE ? OR mt.location LIKE ? OR mt.phone LIKE ? OR u1.name LIKE ?)';
         $like = '%' . $q . '%';
@@ -471,6 +480,7 @@ function marketing_list(PDO $pdo, array $filters, int $userId, bool $canViewAll,
         SELECT
             mt.*,
             COALESCE(mt.take_code, CONCAT('MT-#', mt.id)) AS display_code,
+            COALESCE((SELECT GROUP_CONCAT(DISTINCT oi.delivery_by ORDER BY oi.delivery_by SEPARATOR ', ') FROM out_items oi WHERE FIND_IN_SET(oi.inv, REPLACE(COALESCE(mt.scan_out_invs, ''), ' ', ''))), '') AS delivery_by,
             COALESCE(u1.name, u1.username, '-') AS created_by_name,
             COALESCE(u2.name, u2.username, '-') AS approved_by_name,
             COALESCE(u3.name, u3.username, '-') AS reconciled_by_name,
@@ -721,6 +731,7 @@ try {
             'creators' => marketing_rows($pdo, "SELECT id AS value, COALESCE(NULLIF(name, ''), username, CONCAT('User #', id)) AS label FROM users ORDER BY label"),
             'locations' => marketing_rows($pdo, "SELECT id AS value, TRIM(CONCAT(COALESCE(location_code, ''), CASE WHEN COALESCE(location_code, '') <> '' AND COALESCE(location_name, '') <> '' THEN ' - ' ELSE '' END, COALESCE(location_name, ''))) AS label, is_default FROM storage_locations WHERE is_active = 1 ORDER BY is_default DESC, location_code ASC, location_name ASC"),
             'delivery_types' => marketing_rows($pdo, "SELECT id AS value, name AS label FROM delivery_types WHERE active = 1 ORDER BY name"),
+            'delivery_by' => marketing_rows($pdo, "SELECT DISTINCT delivery_by AS value, delivery_by AS label FROM out_items WHERE COALESCE(delivery_by, '') <> '' ORDER BY delivery_by"),
             'marketing_types' => array_map(
                 static fn(array $row): array => [
                     'value' => (string)$row['type_key'],
@@ -809,6 +820,7 @@ try {
         $deliveryTypeId = (int)($payload['delivery_type_id'] ?? 0);
         $printDeliveryNote = marketing_flag($payload['print_delivery_note'] ?? 0);
         $notes = trim((string)($payload['notes'] ?? ''));
+        $scanOutInvs = trim((string)($payload['scan_out_invs'] ?? ''));
         $items = is_array($payload['items'] ?? null) ? $payload['items'] : [];
         if ($eventName === '' || $eventDate === '') api_error('Event name and date are required.', 422);
         if (!array_key_exists($marketingType, marketing_types($pdo))) api_error('Marketing type is required.', 422);
@@ -827,8 +839,8 @@ try {
         $pdo->beginTransaction();
         try {
             $takeCode = generate_marketing_take_code($pdo);
-            $stmt = $pdo->prepare("INSERT INTO marketing_takes (take_code, event_name, marketing_type, event_date, location, phone, print_delivery_note, delivery_type_id, notes, images, created_by, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval')");
-            $stmt->execute([$takeCode, $eventName, $marketingType, $eventDate, $location, $phone, $printDeliveryNote, $deliveryTypeId > 0 ? $deliveryTypeId : null, $notes, $imagesJson, $userId]);
+            $stmt = $pdo->prepare("INSERT INTO marketing_takes (take_code, event_name, marketing_type, event_date, location, phone, print_delivery_note, delivery_type_id, notes, images, scan_out_invs, created_by, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_approval')");
+            $stmt->execute([$takeCode, $eventName, $marketingType, $eventDate, $location, $phone, $printDeliveryNote, $deliveryTypeId > 0 ? $deliveryTypeId : null, $notes, $imagesJson, $scanOutInvs, $userId]);
             $takeId = (int)$pdo->lastInsertId();
             $itemStmt = $pdo->prepare('INSERT INTO marketing_take_items (marketing_take_id, product_id, quantity_taken) VALUES (?, ?, ?)');
             foreach ($validItems as $item) {
@@ -857,6 +869,7 @@ try {
         $deliveryTypeId = (int)($payload['delivery_type_id'] ?? 0);
         $printDeliveryNote = marketing_flag($payload['print_delivery_note'] ?? 0);
         $notes = trim((string)($payload['notes'] ?? ''));
+        $scanOutInvs = trim((string)($payload['scan_out_invs'] ?? ''));
         $items = is_array($payload['items'] ?? null) ? $payload['items'] : [];
         if ($id <= 0) api_error('Invalid marketing request.', 422);
         if ($eventName === '' || $eventDate === '') api_error('Event name and date are required.', 422);
@@ -885,8 +898,8 @@ try {
 
         $pdo->beginTransaction();
         try {
-            $pdo->prepare('UPDATE marketing_takes SET event_name = ?, marketing_type = ?, event_date = ?, location = ?, phone = ?, print_delivery_note = ?, delivery_type_id = ?, notes = ?, images = ? WHERE id = ?')
-                ->execute([$eventName, $marketingType, $eventDate, $location, $phone, $printDeliveryNote, $deliveryTypeId > 0 ? $deliveryTypeId : null, $notes, $imagesJson, $id]);
+            $pdo->prepare('UPDATE marketing_takes SET event_name = ?, marketing_type = ?, event_date = ?, location = ?, phone = ?, print_delivery_note = ?, delivery_type_id = ?, notes = ?, images = ?, scan_out_invs = ? WHERE id = ?')
+                ->execute([$eventName, $marketingType, $eventDate, $location, $phone, $printDeliveryNote, $deliveryTypeId > 0 ? $deliveryTypeId : null, $notes, $imagesJson, $scanOutInvs, $id]);
             if ($canEditItems) {
                 $pdo->prepare('DELETE FROM marketing_take_items WHERE marketing_take_id = ?')->execute([$id]);
                 $itemStmt = $pdo->prepare('INSERT INTO marketing_take_items (marketing_take_id, product_id, quantity_taken) VALUES (?, ?, ?)');

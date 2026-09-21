@@ -4,7 +4,7 @@
 
 // Database settings
 $DB_HOST = 'localhost';
-$DB_NAME = 'u623004828_muru';
+$DB_NAME = 'test';
 $DB_USER = 'root';
 $DB_PASS = '';
 
@@ -144,4 +144,7 @@ $DOMAIN = 'http://localhost' . $BASE_URL;
 $API_ALLOWED_ORIGINS = [
     'https://muru-report.vercel.app',
     'http://192.168.110.16:5173',
-   ];
+    'http://localhost',
+    'http://localhost:5173',
+    'http://localhost:3000',
+];

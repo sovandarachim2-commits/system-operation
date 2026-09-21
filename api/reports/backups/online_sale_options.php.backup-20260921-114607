@@ -32,7 +32,7 @@ try {
                 SELECT
                     p.id AS value,
                     {$luckyBoxSql} AS is_lucky_box,
-                    p.name AS label,
+                    CONCAT(p.name, CASE WHEN p.sku IS NULL OR p.sku = '' THEN '' ELSE CONCAT(' (', p.sku, ')') END) AS label,
                     COALESCE(pc.selling_price, p.cost, 0) AS price,
                     CASE
                         WHEN COALESCE(pc.original_cost, 0) > 0

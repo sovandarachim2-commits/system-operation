@@ -256,7 +256,8 @@ require_role_or_permission(['admin', 'cashier', 'scanner'], 'scanner_home.view')
     if (data.phone) {
       document.getElementById('phoneInput').value = data.phone;
     }
-    if (data.amount) {
+    // Keep zero as a real amount; unpaid orders may legitimately have no amount due.
+    if (data.amount !== undefined && data.amount !== null) {
       document.getElementById('amountInput').value = data.amount;
     }
     const paidSelect = document.getElementById('paidInput');
@@ -269,6 +270,10 @@ require_role_or_permission(['admin', 'cashier', 'scanner'], 'scanner_home.view')
       names: Array.isArray(data.lucky_set_names) ? data.lucky_set_names : [],
       status: rawStatus,
     };
+    if (luckyOrderContext.qty < 1) {
+      document.getElementById('setTypeInput').value = 'non-set';
+      document.getElementById('setOptions').style.display = 'none';
+    }
     document.getElementById('dateInput').value = formatLocalDateTime(new Date());
     updateLuckyHint();
     syncSubSetRowsToLuckyQty();
@@ -824,7 +829,7 @@ require_role_or_permission(['admin', 'cashier', 'scanner'], 'scanner_home.view')
     }
     if (!phone) { console.log('Missing phone'); showCustomAlert('Enter Phone Number', '#ff4d4f', true); return; }
     if (paid === "" || paid === "- Please select -") { console.log('Missing paid status'); showCustomAlert('Select Paid/Unpaid', '#ff4d4f', true); return; }
-    if (!amount) { console.log('Missing amount'); showCustomAlert('Enter Amount', '#ff4d4f', true); return; }
+    if (amount === '' || !Number.isFinite(Number(amount)) || Number(amount) < 0) { console.log('Missing amount'); showCustomAlert('Enter a valid amount', '#ff4d4f', true); return; }
     if (setType !== 'non-set' && setType !== 'set') {
       showCustomAlert('Error!សូមជ្រើសរើស Set-Type ជាមុនសិន.❌', '#ff4d4f', true);
       return;

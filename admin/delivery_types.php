@@ -7,26 +7,39 @@ $pdo = get_db_connection();
 $errors = [];
 $success = '';
 
+$user = current_user();
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
     if ($action === 'create') {
         require_role_or_permission(['admin'], 'delivery_types.create');
         $name = trim($_POST['name'] ?? '');
+        $code = trim($_POST['code'] ?? '');
+        $fee = (float)($_POST['fee'] ?? 0);
+        $tracking_format = trim($_POST['tracking_format'] ?? '');
+        $order_display = (int)($_POST['order_display'] ?? 0);
+        
         if ($name === '') {
             $errors[] = 'Delivery type name is required.';
         } else {
-            $stmt = $pdo->prepare('INSERT INTO delivery_types (name) VALUES (?)');
-            $stmt->execute([$name]);
+            $stmt = $pdo->prepare('INSERT INTO delivery_types (name, code, fee, tracking_format, order_display, created_by, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?)');
+            $stmt->execute([$name, $code, $fee, $tracking_format, $order_display, $user['id'], $user['id']]);
             $success = 'Delivery type added.';
         }
     } elseif ($action === 'update') {
         require_role_or_permission(['admin'], 'delivery_types.update');
         $id   = (int)($_POST['id'] ?? 0);
         $name = trim($_POST['name'] ?? '');
+        $code = trim($_POST['code'] ?? '');
+        $fee = (float)($_POST['fee'] ?? 0);
+        $tracking_format = trim($_POST['tracking_format'] ?? '');
+        $order_display = (int)($_POST['order_display'] ?? 0);
+        $status = $_POST['status'] ?? 'active';
+
         if ($id > 0 && $name !== '') {
-            $stmt = $pdo->prepare('UPDATE delivery_types SET name = ? WHERE id = ?');
-            $stmt->execute([$name, $id]);
+            $stmt = $pdo->prepare('UPDATE delivery_types SET name = ?, code = ?, fee = ?, tracking_format = ?, order_display = ?, status = ?, updated_by = ? WHERE id = ?');
+            $stmt->execute([$name, $code, $fee, $tracking_format, $order_display, $status, $user['id'], $id]);
             $success = 'Delivery type updated.';
         }
     } elseif ($action === 'delete') {
@@ -62,17 +75,31 @@ include __DIR__ . '/../layout/header.php';
                         <tr>
                             <th>ID</th>
                             <th>Name</th>
+                            <th>Method Code</th>
+                            <th>Default Fee</th>
+                            <th>Order</th>
+                            <th>Tracking Number Pattern</th>
+                            <th>Status</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                     <?php if (!$types): ?>
-                        <tr><td colspan="3" class="text-center py-4">No delivery types found.</td></tr>
+                        <tr><td colspan="7" class="text-center py-4">No delivery types found.</td></tr>
                     <?php else: ?>
                         <?php foreach ($types as $t): ?>
                         <tr>
                             <td><?= (int)$t['id'] ?></td>
                             <td><?= htmlspecialchars($t['name']) ?></td>
+                            <td><code><?= htmlspecialchars($t['code'] ?? '') ?></code></td>
+                            <td>$<?= number_format((float)($t['fee'] ?? 0), 2) ?></td>
+                            <td><?= (int)($t['order_display'] ?? 0) ?></td>
+                            <td><code><?= htmlspecialchars($t['tracking_format'] ?? '') ?></code></td>
+                            <td>
+                                <span class="badge bg-<?= $t['status'] === 'active' ? 'success' : 'secondary' ?>">
+                                    <?= ucfirst($t['status'] ?? 'active') ?>
+                                </span>
+                            </td>
                             <td>
                                 <div class="d-flex flex-wrap gap-2">
                                     <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#editTypeModal<?= (int)$t['id'] ?>">Edit</button>
@@ -100,6 +127,29 @@ include __DIR__ . '/../layout/header.php';
                                             <div>
                                                 <label class="form-label">Name</label>
                                                 <input type="text" name="name" class="form-control form-control-lg" value="<?= htmlspecialchars($t['name']) ?>" required>
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Method Code</label>
+                                                <input type="text" name="code" class="form-control form-control-lg" value="<?= htmlspecialchars($t['code'] ?? '') ?>">
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Default Fee ($)</label>
+                                                <input type="number" step="0.01" name="fee" class="form-control form-control-lg" value="<?= htmlspecialchars((string)($t['fee'] ?? 0)) ?>">
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Display Order</label>
+                                                <input type="number" name="order_display" class="form-control form-control-lg" value="<?= (int)($t['order_display'] ?? 0) ?>">
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Tracking Number Pattern</label>
+                                                <input type="text" name="tracking_format" class="form-control form-control-lg" value="<?= htmlspecialchars($t['tracking_format'] ?? '') ?>">
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Status</label>
+                                                <select name="status" class="form-select form-select-lg">
+                                                    <option value="active" <?= ($t['status'] ?? 'active') === 'active' ? 'selected' : '' ?>>Active</option>
+                                                    <option value="inactive" <?= ($t['status'] ?? 'active') === 'inactive' ? 'selected' : '' ?>>Inactive</option>
+                                                </select>
                                             </div>
                                         </div>
                                         <div class="modal-footer">
@@ -134,6 +184,22 @@ include __DIR__ . '/../layout/header.php';
                     <div>
                         <label class="form-label">Name</label>
                         <input type="text" name="name" class="form-control form-control-lg" required>
+                    </div>
+                    <div>
+                        <label class="form-label">Method Code</label>
+                        <input type="text" name="code" class="form-control form-control-lg" placeholder="e.g. VET-EXPRESS">
+                    </div>
+                    <div>
+                        <label class="form-label">Default Fee ($)</label>
+                        <input type="number" step="0.01" name="fee" class="form-control form-control-lg" value="0.00">
+                    </div>
+                    <div>
+                        <label class="form-label">Display Order</label>
+                        <input type="number" name="order_display" class="form-control form-control-lg" value="0">
+                    </div>
+                    <div>
+                        <label class="form-label">Tracking Number Pattern</label>
+                        <input type="text" name="tracking_format" class="form-control form-control-lg" placeholder="VET-{ORDER_CODE}">
                     </div>
                 </div>
                 <div class="modal-footer">

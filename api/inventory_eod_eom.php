@@ -355,7 +355,7 @@ function eod_eom_marketing_type_breakdown(PDO $pdo, string $month): array
                 p.name AS item_name,
                 COALESCE(p.sku, '') AS sku,
                 COALESCE(NULLIF(TRIM(mt.marketing_type), ''), 'other') AS marketing_type,
-                SUM(mti.quantity_taken) AS qty
+                SUM(mti.quantity_taken - mti.quantity_returned) AS qty
             FROM marketing_takes mt
             JOIN marketing_take_items mti ON mti.marketing_take_id = mt.id
             JOIN products p ON p.id = mti.product_id
@@ -1149,7 +1149,7 @@ function inventory_closing_eod_ops_totals_by_date(PDO $pdo, array $dates): array
 
     try {
         $stmt = $pdo->prepare("
-            SELECT DATE(mt.approved_at) AS op_date, SUM(mti.quantity_taken) AS marketing_take_out
+            SELECT DATE(mt.approved_at) AS op_date, SUM(mti.quantity_taken - mti.quantity_returned) AS marketing_take_out
             FROM marketing_takes mt
             JOIN marketing_take_items mti ON mti.marketing_take_id = mt.id
             WHERE DATE(mt.approved_at) IN ($placeholders)
@@ -1405,7 +1405,7 @@ function inventory_closing_attach_sales_to_rows(PDO $pdo, array $rows, string $r
                 SELECT
                     p.name AS item_name,
                     mt.storage_location_id,
-                    SUM(mti.quantity_taken) AS marketing_take_out,
+                    SUM(mti.quantity_taken - mti.quantity_returned) AS marketing_take_out,
                     0 AS marketing_return
                 FROM marketing_takes mt
                 JOIN marketing_take_items mti ON mti.marketing_take_id = mt.id

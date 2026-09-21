@@ -196,6 +196,7 @@ function rbac_system_report_modules(): array
             ['resource' => 'sr_dealer_orders', 'label' => 'Dealer Orders', 'actions' => ['view', 'create', 'update', 'delete']],
             ['resource' => 'sr_dealer_payments', 'label' => 'Dealer Payments', 'actions' => ['view', 'create', 'update', 'delete']],
             ['resource' => 'sr_dealer_reports', 'label' => 'Dealer Reports', 'actions' => ['view']],
+            ['resource' => 'sr_dealer_sold_stock', 'label' => 'Stock Sold Dealer', 'actions' => ['view']],
         ],
         'Purchase' => [
             ['resource' => 'sr_purchase_orders', 'label' => 'Purchase Orders', 'actions' => ['view', 'create', 'update', 'delete']],
@@ -236,8 +237,24 @@ function rbac_system_report_modules(): array
         ],
         'Settings' => [
             ['resource' => 'sr_notification_settings', 'label' => 'Notification Settings', 'actions' => ['view', 'update']],
-            ['resource' => 'logos', 'label' => 'App Logo'],
+            ['resource' => 'sr_app_logo_settings', 'label' => 'App Logo', 'actions' => ['view', 'update']],
             ['resource' => 'sr_invoice_settings', 'label' => 'Invoice Settings', 'actions' => ['view', 'update']],
+        ],
+        'Setup' => [
+            ['resource' => 'sr_setup_pages', 'label' => 'Pages', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_setup_delivery_types', 'label' => 'Delivery Types', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_setup_delivery_price', 'label' => 'Delivery Price', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_setup_logos', 'label' => 'Logos', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_setup_note_options', 'label' => 'Note Options', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_setup_money_exchange', 'label' => 'Money Exchange', 'actions' => ['view', 'create', 'update', 'delete']],
+        ],
+        'Product Management' => [
+            ['resource' => 'sr_product_management', 'label' => 'Product', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_product_set', 'label' => 'Product Set', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_lucky_box_sets', 'label' => 'Lucky Box Sets', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_qr_customer_code', 'label' => 'Set QR Customer Code', 'actions' => ['view', 'create', 'update']],
+            ['resource' => 'sr_qr_label_history', 'label' => 'QR Label History', 'actions' => ['view']],
+            ['resource' => 'sr_brand', 'label' => 'Brand', 'actions' => ['view', 'create', 'update', 'delete']],
         ],
     ];
 }

@@ -3,7 +3,6 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../bootstrap.php';
 require_once __DIR__ . '/../../helpers.php';
-require_once __DIR__ . '/online_sale_stock.php';
 require_once __DIR__ . '/../../user_activity_lib.php';
 
 require_role_or_permission(['admin', 'seller'], 'seller_orders.update', 'orders.update', 'sr_orders.update');
@@ -62,8 +61,8 @@ try {
 
     $printedStmt = $pdo->prepare('SELECT 1 FROM print_jobs WHERE order_id = ? LIMIT 1');
     $printedStmt->execute([$orderId]);
-    if ($printedStmt->fetchColumn() && !$canEditAnyOrder) {
-        api_error('Printed orders require Order Management update permission.', 403);
+    if ($printedStmt->fetchColumn()) {
+        api_error('Printed orders must be edited from the full order page so inventory stays correct.', 409);
     }
 
     $customerName = online_sale_update_trim($payload, 'customer_name');
@@ -119,14 +118,12 @@ try {
     $itemsByKey = [];
     foreach ($submittedItems as $submittedItem) {
         if (!is_array($submittedItem)) {
-            $errors[] = 'Invalid product line.';
             continue;
         }
         $productId = filter_var($submittedItem['product_id'] ?? null, FILTER_VALIDATE_INT);
-        $quantity = filter_var($submittedItem['quantity'] ?? null, FILTER_VALIDATE_INT);
+        $quantity = max(1, (int)($submittedItem['quantity'] ?? 1));
         $isLucky = (($submittedItem['line_mode'] ?? '') === 'lucky') ? 1 : 0;
-        if (!$productId || $productId <= 0 || !$quantity || $quantity <= 0) {
-            $errors[] = 'Each product needs a valid product and a positive whole quantity.';
+        if ($productId === false || $productId === null || $productId <= 0) {
             continue;
         }
 
@@ -138,13 +135,12 @@ try {
                 pc.month_year
             FROM products p
             LEFT JOIN product_costs pc ON pc.product_id = p.id AND pc.month_year = ?
-            WHERE p.id = ? AND (p.active = 1 OR EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id = ? AND oi.product_id = p.id))
+            WHERE p.id = ? AND p.active = 1
             LIMIT 1
         ");
-        $stmt->execute([$currentMonth, (int)$productId, $orderId]);
+        $stmt->execute([$currentMonth, (int)$productId]);
         $product = $stmt->fetch(PDO::FETCH_ASSOC);
         if (!$product) {
-            $errors[] = 'A selected product is unavailable. Reload the order and try again.';
             continue;
         }
 
@@ -199,23 +195,6 @@ try {
     }
 
     $pdo->beginTransaction();
-    // Refresh under the lock: a concurrent save must not reuse stale quantities.
-    $lockStmt = $pdo->prepare($loadSql . ' FOR UPDATE');
-    $lockStmt->execute($loadParams);
-    $order = $lockStmt->fetch(PDO::FETCH_ASSOC);
-    if (!$order) { throw new DomainException('Order not found or access denied.'); }
-    if (!empty($order['is_cancelled']) || !empty($order['is_returned'])) {
-        throw new DomainException('Cancelled or returned orders cannot be edited.');
-    }
-    $existingItemsStmt->execute([$orderId]);
-    $existingItems = $existingItemsStmt->fetchAll(PDO::FETCH_ASSOC);
-    $printedStmt->execute([$orderId]);
-    $isPrinted = (bool)$printedStmt->fetchColumn();
-    if ($isPrinted) {
-        if (!$canEditAnyOrder) { throw new DomainException('Printed orders require Order Management update permission.'); }
-        online_sale_apply_stock($pdo, $orderId, $user, $existingItems, $items);
-    }
-
     $updateOrder = $pdo->prepare('
         UPDATE orders
         SET
@@ -307,7 +286,6 @@ try {
             $user['name'] ?? $user['username'] ?? null,
             'order_edit_report_native',
             json_encode([
-                'printed' => $isPrinted,
                 'fields' => $fieldChanges,
                 'changes' => [
                     'old_qty' => $oldQtyMap,
@@ -352,5 +330,5 @@ try {
         $pdo->rollBack();
     }
     error_log('online_sale_update API error: ' . $e->getMessage());
-    api_error($e instanceof DomainException ? $e->getMessage() : 'Unable to update online sale.', $e instanceof DomainException ? 422 : 500);
+    api_error('Unable to update online sale.', 500);
 }

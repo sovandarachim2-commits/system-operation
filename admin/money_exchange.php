@@ -14,8 +14,21 @@ $pdo = get_db_connection();
 $pdo->exec("CREATE TABLE IF NOT EXISTS settings (
     id INT AUTO_INCREMENT PRIMARY KEY,
     setting_key VARCHAR(255) UNIQUE NOT NULL,
-    setting_value TEXT
+    setting_value TEXT,
+    created_by INT DEFAULT NULL,
+    updated_by INT DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 )");
+
+// Check for missing columns in case table already existed
+try {
+    $cols = $pdo->query("SHOW COLUMNS FROM settings")->fetchAll(PDO::FETCH_COLUMN);
+    if (!in_array('created_by', $cols)) $pdo->exec("ALTER TABLE settings ADD COLUMN created_by INT DEFAULT NULL");
+    if (!in_array('updated_by', $cols)) $pdo->exec("ALTER TABLE settings ADD COLUMN updated_by INT DEFAULT NULL");
+    if (!in_array('created_at', $cols)) $pdo->exec("ALTER TABLE settings ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+    if (!in_array('updated_at', $cols)) $pdo->exec("ALTER TABLE settings ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
+} catch (Exception $e) {}
 
 $errors = [];
 $success = '';

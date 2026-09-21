@@ -14,11 +14,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         require_role_or_permission(['admin'], 'delivery_costs.create');
         $label  = trim($_POST['label'] ?? '');
         $amount = trim($_POST['amount'] ?? '0');
+        $zone_name = trim($_POST['zone_name'] ?? '');
+        $delivery_type = trim($_POST['delivery_type'] ?? '');
+        $price_khr = (int)($_POST['price_khr'] ?? 0);
+        $free_threshold = (float)($_POST['free_threshold'] ?? 0);
+
         if ($label === '') {
             $errors[] = 'Label is required.';
         } else {
-            $stmt = $pdo->prepare('INSERT INTO delivery_costs (label, amount) VALUES (?, ?)');
-            $stmt->execute([$label, $amount]);
+            $stmt = $pdo->prepare('INSERT INTO delivery_costs (label, amount, zone_name, delivery_type, price_khr, free_threshold) VALUES (?, ?, ?, ?, ?, ?)');
+            $stmt->execute([$label, $amount, $zone_name, $delivery_type, $price_khr, $free_threshold]);
             $success = 'Delivery cost added.';
         }
     } elseif ($action === 'update') {
@@ -26,9 +31,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id     = (int)($_POST['id'] ?? 0);
         $label  = trim($_POST['label'] ?? '');
         $amount = trim($_POST['amount'] ?? '0');
+        $zone_name = trim($_POST['zone_name'] ?? '');
+        $delivery_type = trim($_POST['delivery_type'] ?? '');
+        $price_khr = (int)($_POST['price_khr'] ?? 0);
+        $free_threshold = (float)($_POST['free_threshold'] ?? 0);
+        $status = $_POST['status'] ?? 'active';
+
         if ($id > 0 && $label !== '') {
-            $stmt = $pdo->prepare('UPDATE delivery_costs SET label = ?, amount = ? WHERE id = ?');
-            $stmt->execute([$label, $amount, $id]);
+            $stmt = $pdo->prepare('UPDATE delivery_costs SET label = ?, amount = ?, zone_name = ?, delivery_type = ?, price_khr = ?, free_threshold = ?, status = ? WHERE id = ?');
+            $stmt->execute([$label, $amount, $zone_name, $delivery_type, $price_khr, $free_threshold, $status, $id]);
             $success = 'Delivery cost updated.';
         }
     } elseif ($action === 'delete') {
@@ -63,20 +74,30 @@ include __DIR__ . '/../layout/header.php';
                     <thead class="table-light">
                         <tr>
                             <th>ID</th>
-                            <th>Label</th>
-                            <th>Amount</th>
+                            <th>Zone Name</th>
+                            <th>USD</th>
+                            <th>KHR</th>
+                            <th>Free Threshold</th>
+                            <th>Status</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                     <?php if (!$costs): ?>
-                        <tr><td colspan="4" class="text-center py-4">No delivery costs found.</td></tr>
+                        <tr><td colspan="8" class="text-center py-4">No delivery costs found.</td></tr>
                     <?php else: ?>
                         <?php foreach ($costs as $c): ?>
                         <tr>
                             <td><?= (int)$c['id'] ?></td>
-                            <td><?= htmlspecialchars($c['label']) ?></td>
+                            <td><?= htmlspecialchars($c['zone_name'] ?? $c['label']) ?></td>
                             <td>$<?= number_format((float)$c['amount'], 2) ?></td>
+                            <td><?= number_format((float)($c['price_khr'] ?? 0)) ?> ៛</td>
+                            <td>Over $<?= number_format((float)($c['free_threshold'] ?? 0), 2) ?></td>
+                            <td>
+                                <span class="badge bg-<?= ($c['status'] ?? 'active') === 'active' ? 'success' : 'secondary' ?>">
+                                    <?= ucfirst($c['status'] ?? 'active') ?>
+                                </span>
+                            </td>
                             <td>
                                 <div class="d-flex flex-wrap gap-2">
                                     <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#editCostModal<?= (int)$c['id'] ?>">Edit</button>
@@ -102,12 +123,33 @@ include __DIR__ . '/../layout/header.php';
                                             <input type="hidden" name="action" value="update">
                                             <input type="hidden" name="id" value="<?= (int)$c['id'] ?>">
                                             <div>
-                                                <label class="form-label">Label</label>
+                                                <label class="form-label">Zone Name (Label)</label>
                                                 <input type="text" name="label" class="form-control form-control-lg" value="<?= htmlspecialchars($c['label']) ?>" required>
                                             </div>
                                             <div>
-                                                <label class="form-label">Amount</label>
-                                                <input type="number" step="0.01" name="amount" class="form-control form-control-lg" value="<?= htmlspecialchars($c['amount']) ?>" required>
+                                                <label class="form-label">Zone Name (Display)</label>
+                                                <input type="text" name="zone_name" class="form-control form-control-lg" value="<?= htmlspecialchars($c['zone_name'] ?? $c['label']) ?>">
+                                            </div>
+                                            <div class="row g-2">
+                                                <div class="col-6">
+                                                    <label class="form-label">Price (USD)</label>
+                                                    <input type="number" step="0.01" name="amount" class="form-control form-control-lg" value="<?= htmlspecialchars($c['amount']) ?>" required>
+                                                </div>
+                                                <div class="col-6">
+                                                    <label class="form-label">Price (KHR)</label>
+                                                    <input type="number" name="price_khr" class="form-control form-control-lg" value="<?= htmlspecialchars((string)($c['price_khr'] ?? 0)) ?>">
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Free Threshold ($)</label>
+                                                <input type="number" step="0.01" name="free_threshold" class="form-control form-control-lg" value="<?= htmlspecialchars((string)($c['free_threshold'] ?? 0)) ?>">
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Status</label>
+                                                <select name="status" class="form-select form-select-lg">
+                                                    <option value="active" <?= ($c['status'] ?? 'active') === 'active' ? 'selected' : '' ?>>Active</option>
+                                                    <option value="inactive" <?= ($c['status'] ?? 'active') === 'inactive' ? 'selected' : '' ?>>Inactive</option>
+                                                </select>
                                             </div>
                                         </div>
                                         <div class="modal-footer">
@@ -140,12 +182,26 @@ include __DIR__ . '/../layout/header.php';
                 <div class="modal-body d-flex flex-column gap-3">
                     <input type="hidden" name="action" value="create">
                     <div>
-                        <label class="form-label">Label (e.g. 0$, 1$)</label>
+                        <label class="form-label">Zone Name (Label)</label>
                         <input type="text" name="label" class="form-control form-control-lg" required>
                     </div>
                     <div>
-                        <label class="form-label">Amount</label>
-                        <input type="number" step="0.01" name="amount" class="form-control form-control-lg" required>
+                        <label class="form-label">Zone Name (Display)</label>
+                        <input type="text" name="zone_name" class="form-control form-control-lg" placeholder="e.g. Phnom Penh Central">
+                    </div>
+                    <div class="row g-2">
+                        <div class="col-6">
+                            <label class="form-label">Price (USD)</label>
+                            <input type="number" step="0.01" name="amount" class="form-control form-control-lg" value="0.00" required>
+                        </div>
+                        <div class="col-6">
+                            <label class="form-label">Price (KHR)</label>
+                            <input type="number" name="price_khr" class="form-control form-control-lg" value="0">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="form-label">Free Threshold ($)</label>
+                        <input type="number" step="0.01" name="free_threshold" class="form-control form-control-lg" value="0.00">
                     </div>
                 </div>
                 <div class="modal-footer">

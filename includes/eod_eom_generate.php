@@ -1498,7 +1498,7 @@ function eod_eom_eom_sheet_lookups(PDO $pdo, string $monthStart, string $monthEn
 
     try {
         $stmt = $pdo->prepare("
-            SELECT p.name AS item_name, COALESCE(p.sku, '') AS sku, SUM(mti.quantity_taken) AS qty
+            SELECT p.name AS item_name, COALESCE(p.sku, '') AS sku, SUM(mti.quantity_taken - mti.quantity_returned) AS qty
             FROM marketing_takes mt
             JOIN marketing_take_items mti ON mti.marketing_take_id = mt.id
             JOIN products p ON p.id = mti.product_id

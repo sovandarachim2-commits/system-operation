@@ -14,12 +14,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         require_role_or_permission(['admin'], 'pages.create');
         $name = trim($_POST['name'] ?? '');
         $slug = trim($_POST['slug'] ?? '');
+        $code = trim($_POST['code'] ?? '');
+        $platform = trim($_POST['platform'] ?? 'Facebook');
+        $seller = trim($_POST['seller'] ?? '');
+
         if ($name === '' || $slug === '') {
             $errors[] = 'Name and slug are required.';
         } else {
             try {
-                $stmt = $pdo->prepare('INSERT INTO pages (name, slug) VALUES (?, ?)');
-                $stmt->execute([$name, $slug]);
+                $stmt = $pdo->prepare('INSERT INTO pages (name, slug, code, platform, seller) VALUES (?, ?, ?, ?, ?)');
+                $stmt->execute([$name, $slug, $code, $platform, $seller]);
                 $success = 'Page added.';
             } catch (PDOException $e) {
                 $errors[] = 'Slug must be unique.';
@@ -30,9 +34,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id   = (int)($_POST['id'] ?? 0);
         $name = trim($_POST['name'] ?? '');
         $slug = trim($_POST['slug'] ?? '');
+        $code = trim($_POST['code'] ?? '');
+        $platform = trim($_POST['platform'] ?? 'Facebook');
+        $seller = trim($_POST['seller'] ?? '');
+        $status = $_POST['status'] ?? 'active';
+
         if ($id > 0 && $name !== '' && $slug !== '') {
-            $stmt = $pdo->prepare('UPDATE pages SET name = ?, slug = ? WHERE id = ?');
-            $stmt->execute([$name, $slug, $id]);
+            $stmt = $pdo->prepare('UPDATE pages SET name = ?, slug = ?, code = ?, platform = ?, seller = ?, status = ? WHERE id = ?');
+            $stmt->execute([$name, $slug, $code, $platform, $seller, $status, $id]);
             $success = 'Page updated.';
         }
     } elseif ($action === 'delete') {
@@ -69,18 +78,30 @@ include __DIR__ . '/../layout/header.php';
                             <th>ID</th>
                             <th>Name</th>
                             <th>Slug</th>
+                            <th>Code</th>
+                            <th>Platform</th>
+                            <th>Seller</th>
+                            <th>Status</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                     <?php if (!$pages): ?>
-                        <tr><td colspan="4" class="text-center py-4">No pages found.</td></tr>
+                        <tr><td colspan="8" class="text-center py-4">No pages found.</td></tr>
                     <?php else: ?>
                         <?php foreach ($pages as $p): ?>
                         <tr>
                             <td><?= (int)$p['id'] ?></td>
                             <td><?= htmlspecialchars($p['name']) ?></td>
-                            <td><?= htmlspecialchars($p['slug']) ?></td>
+                            <td><code><?= htmlspecialchars($p['slug']) ?></code></td>
+                            <td><code><?= htmlspecialchars($p['code'] ?? '') ?></code></td>
+                            <td><span class="badge bg-info text-dark"><?= htmlspecialchars($p['platform'] ?? 'Facebook') ?></span></td>
+                            <td><?= htmlspecialchars($p['seller'] ?? '') ?></td>
+                            <td>
+                                <span class="badge bg-<?= ($p['status'] ?? 'active') === 'active' ? 'success' : 'secondary' ?>">
+                                    <?= ucfirst($p['status'] ?? 'active') ?>
+                                </span>
+                            </td>
                             <td>
                                 <div class="d-flex flex-wrap gap-2">
                                     <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#editPageModal<?= (int)$p['id'] ?>">Edit</button>
@@ -112,6 +133,30 @@ include __DIR__ . '/../layout/header.php';
                                             <div>
                                                 <label class="form-label">Slug</label>
                                                 <input type="text" name="slug" class="form-control form-control-lg" value="<?= htmlspecialchars($p['slug']) ?>" required>
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Code</label>
+                                                <input type="text" name="code" class="form-control form-control-lg" value="<?= htmlspecialchars($p['code'] ?? '') ?>">
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Platform</label>
+                                                <select name="platform" class="form-select form-select-lg">
+                                                    <option value="Facebook" <?= ($p['platform'] ?? 'Facebook') === 'Facebook' ? 'selected' : '' ?>>Facebook</option>
+                                                    <option value="TikTok Live" <?= ($p['platform'] ?? '') === 'TikTok Live' ? 'selected' : '' ?>>TikTok Live</option>
+                                                    <option value="Telegram" <?= ($p['platform'] ?? '') === 'Telegram' ? 'selected' : '' ?>>Telegram</option>
+                                                    <option value="Direct POS" <?= ($p['platform'] ?? '') === 'Direct POS' ? 'selected' : '' ?>>Direct POS</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Seller</label>
+                                                <input type="text" name="seller" class="form-control form-control-lg" value="<?= htmlspecialchars($p['seller'] ?? '') ?>">
+                                            </div>
+                                            <div>
+                                                <label class="form-label">Status</label>
+                                                <select name="status" class="form-select form-select-lg">
+                                                    <option value="active" <?= ($p['status'] ?? 'active') === 'active' ? 'selected' : '' ?>>Active</option>
+                                                    <option value="inactive" <?= ($p['status'] ?? 'active') === 'inactive' ? 'selected' : '' ?>>Inactive</option>
+                                                </select>
                                             </div>
                                         </div>
                                         <div class="modal-footer">
@@ -150,6 +195,24 @@ include __DIR__ . '/../layout/header.php';
                     <div>
                         <label class="form-label">Slug</label>
                         <input type="text" name="slug" class="form-control form-control-lg" required>
+                    </div>
+                    <div>
+                        <label class="form-label">Code</label>
+                        <input type="text" name="code" class="form-control form-control-lg" placeholder="e.g. PAGE-MURU-FB">
+                    </div>
+                    <div>
+                        <label class="form-label">Platform</label>
+                        <select name="platform" class="form-select form-select-lg">
+                            <option value="Facebook">Facebook</option>
+                            <option value="TikTok Live">TikTok Live</option>
+                            <option value="Telegram">Telegram</option>
+                            <option value="Direct POS">Direct POS</option>
+                            <option value="Instagram">Instagram</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">Seller</label>
+                        <input type="text" name="seller" class="form-control form-control-lg" placeholder="Assigned seller name">
                     </div>
                 </div>
                 <div class="modal-footer">

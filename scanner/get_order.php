@@ -41,7 +41,37 @@ try {
         $offlineRes = $offlineStmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$offlineRes) {
-            echo json_encode(['result' => 'not_found']);
+            $marketingStmt = $pdo->prepare("SELECT id, take_code, phone, status FROM marketing_takes WHERE take_code = ? LIMIT 1");
+            $marketingStmt->execute([$inv]);
+            $marketingRes = $marketingStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$marketingRes) {
+                echo json_encode(['result' => 'not_found']);
+                exit;
+            }
+            $marketingItems = [];
+            $itemStmt = $pdo->prepare("SELECT p.name, mti.quantity_taken FROM marketing_take_items mti JOIN products p ON p.id = mti.product_id WHERE mti.marketing_take_id = ? ORDER BY p.name");
+            $itemStmt->execute([(int)$marketingRes['id']]);
+            $marketingItems = $itemStmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+            $hasSet = false;
+            foreach ($marketingItems as $marketingItem) {
+                if (stripos((string)($marketingItem['name'] ?? ''), 'set') !== false || stripos((string)($marketingItem['name'] ?? ''), 'lucky') !== false) {
+                    $hasSet = true;
+                    break;
+                }
+            }
+            echo json_encode([
+                'result' => 'success',
+                'data' => [
+                    'inv' => $marketingRes['take_code'],
+                    'phone' => $marketingRes['phone'] ?? '',
+                    'status' => 'unpaid',
+                    'amount' => 0,
+                    'marketing' => true,
+                    'marketing_items' => $marketingItems,
+                    'lucky_box_qty' => $hasSet ? 1 : 0,
+                    'lucky_set_names' => $hasSet ? array_values(array_map(static fn(array $item): string => (string)$item['name'], $marketingItems)) : [],
+                ],
+            ], JSON_UNESCAPED_UNICODE);
             exit;
         }
 

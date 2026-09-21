@@ -361,12 +361,13 @@ include __DIR__ . '/../../layout/header.php';
                   <th title="Like Settings → About → Model Name (e.g. iPhone 12). Not the device Name nickname.">Model Name</th>
                   <th title="From User-Agent / hints (e.g. iPhone13,2). Not Apple Model Number (MGEW3LL/A).">Model code</th>
                   <th>URI</th>
+                  <th title="Which website the user was on when this action was logged.">Source</th>
                 </tr>
               </thead>
               <tbody>
                 <?php if (!$rows): ?>
                   <tr>
-                    <td colspan="11" class="text-center text-muted py-5">
+                    <td colspan="12" class="text-center text-muted py-5">
                       <i class="bi bi-inbox fs-1 d-block mb-2 opacity-50"></i>
                       <?= $totalRows === 0 ? 'No rows match your filters (or the log is empty yet).' : 'No rows on this page.' ?>
                     </td>
@@ -406,7 +407,10 @@ include __DIR__ . '/../../layout/header.php';
                       </td>
                       <td><span class="badge bg-dark fw-normal"><?= htmlspecialchars((string)$r['action']) ?></span></td>
                       <td class="small"><?= htmlspecialchars((string)($r['details'] ?? '')) ?></td>
-                      <td class="small font-monospace"><?= htmlspecialchars((string)($r['ip_address'] ?? '')) ?></td>
+                      <td class="small font-monospace"><?php
+                        $ip = (string)($r['ip_address'] ?? '');
+                        echo $ip === '::1' ? '127.0.0.1' : htmlspecialchars($ip);
+                      ?></td>
                       <td class="small"><?php
                         $dev = trim((string)($r['device'] ?? ''));
                         echo $dev !== '' ? htmlspecialchars($dev) : '<span class="text-muted">—</span>';
@@ -425,7 +429,21 @@ include __DIR__ . '/../../layout/header.php';
                         );
                         echo $dmod !== '' ? htmlspecialchars($dmod) : '<span class="text-muted">—</span>';
                       ?></td>
-                      <td class="small text-break" title="<?= htmlspecialchars((string)($r['user_agent'] ?? '')) ?>"><?= htmlspecialchars((string)($r['request_uri'] ?? '')) ?></td>
+                      <?php
+                        $uri = (string)($r['request_uri'] ?? '');
+                        $uriShort = preg_replace('#^https?://[^/]+#', '', $uri);
+                        $uriShort = mb_strlen($uriShort) > 30 ? mb_substr($uriShort, 0, 30) . '...' : $uriShort;
+                      ?><td class="small" style="cursor:pointer; text-decoration:underline dotted #3b82f6; color:#3b82f6;" onclick="showDetailCard('URI', this.dataset.full)" data-full="<?= htmlspecialchars($uri) ?>"><?= htmlspecialchars($uriShort ?: '—') ?></td>
+                      <td class="small"><?php
+                        $furl = trim((string)($r['frontend_url'] ?? ''));
+                        if ($furl !== '') {
+                          $furlShort = preg_replace('#^https?://[^/]+#', '', $furl);
+                          $furlShort = mb_strlen($furlShort) > 30 ? mb_substr($furlShort, 0, 30) . '...' : $furlShort;
+                          echo '<span style="cursor:pointer; text-decoration:underline dotted #3b82f6; color:#3b82f6;" onclick="showDetailCard(\'Source\', this.dataset.full)" data-full="' . htmlspecialchars($furl) . '">' . htmlspecialchars($furlShort) . '</span>';
+                        } else {
+                          echo '<span class="text-muted">—</span>';
+                        }
+                      ?></td>
                     </tr>
                   <?php endforeach; ?>
                 <?php endif; ?>
@@ -497,4 +515,24 @@ include __DIR__ . '/../../layout/header.php';
     </div>
   </div>
 </div>
+
+<div id="detail-card-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; z-index:999; background:rgba(0,0,0,0.3);" onclick="hideDetailCard()">
+  <div id="detail-card-box" style="position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:#1e293b; border:1px solid #334155; border-radius:8px; padding:18px 22px; z-index:1000; min-width:400px; max-width:600px; box-shadow:0 8px 30px rgba(0,0,0,0.4);" onclick="event.stopPropagation()">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+      <div id="detail-card-label" style="font-size:12px; color:#94a3b8; font-weight:600; text-transform:uppercase; letter-spacing:1px;"></div>
+      <button type="button" onclick="hideDetailCard()" style="background:transparent; color:#94a3b8; border:none; font-size:18px; cursor:pointer; padding:0 4px; line-height:1;">×</button>
+    </div>
+    <div id="detail-card-full" style="font-size:13px; color:#e2e8f0; word-break:break-all; line-height:1.6; font-family:monospace; background:#0f172a; border-radius:6px; padding:12px 14px; border:1px solid #1e293b;"></div>
+  </div>
+</div>
+<script>
+function showDetailCard(label, full) {
+  document.getElementById('detail-card-label').textContent = label;
+  document.getElementById('detail-card-full').textContent = full || '\u2014';
+  document.getElementById('detail-card-overlay').style.display = 'block';
+}
+function hideDetailCard() {
+  document.getElementById('detail-card-overlay').style.display = 'none';
+}
+</script>
 <?php include __DIR__ . '/../../layout/footer.php'; ?>
