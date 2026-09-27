@@ -4,7 +4,7 @@
 
 // Database settings
 $DB_HOST = 'localhost';
-$DB_NAME = 'test';
+$DB_NAME = 'closing';
 $DB_USER = 'root';
 $DB_PASS = '';
 

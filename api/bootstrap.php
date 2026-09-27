@@ -102,7 +102,15 @@ function api_json(array $payload, int $status = 200): void
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate');
-    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $flags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
+    if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+        $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
+    }
+    $json = json_encode($payload, $flags);
+    if ($json === false) {
+        $json = '{"success":false,"message":"Could not encode response."}';
+    }
+    echo $json;
     exit;
 }
 

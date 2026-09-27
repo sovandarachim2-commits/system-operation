@@ -7,27 +7,31 @@ require_once __DIR__ . '/db.php';
  */
 function user_activity_ensure_table(PDO $pdo): void
 {
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS user_activity_log (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            user_id INT NULL,
-            user_name VARCHAR(255) NULL,
-            action VARCHAR(100) NOT NULL,
-            details VARCHAR(500) NULL,
-            context JSON NULL,
-            ip_address VARCHAR(45) NULL,
-            device VARCHAR(128) NULL,
-            device_name VARCHAR(128) NULL,
-            device_model VARCHAR(128) NULL,
-            user_agent VARCHAR(512) NULL,
-            request_uri VARCHAR(512) NULL,
-            frontend_url VARCHAR(512) NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_user_created (user_id, created_at),
-            INDEX idx_created (created_at),
-            INDEX idx_action (action)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    ");
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS user_activity_log (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NULL,
+                user_name VARCHAR(255) NULL,
+                action VARCHAR(100) NOT NULL,
+                details VARCHAR(500) NULL,
+                context JSON NULL,
+                ip_address VARCHAR(45) NULL,
+                device VARCHAR(128) NULL,
+                device_name VARCHAR(128) NULL,
+                device_model VARCHAR(128) NULL,
+                user_agent VARCHAR(512) NULL,
+                request_uri VARCHAR(512) NULL,
+                frontend_url VARCHAR(512) NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_user_created (user_id, created_at),
+                INDEX idx_created (created_at),
+                INDEX idx_action (action)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        ");
+    } catch (Throwable $e) {
+        error_log('user_activity_ensure_table create: ' . $e->getMessage());
+    }
     try {
         $chk = $pdo->query("SHOW COLUMNS FROM user_activity_log LIKE 'device'");
         if ($chk && !$chk->fetch(PDO::FETCH_ASSOC)) {
@@ -67,6 +71,96 @@ function user_activity_ensure_table(PDO $pdo): void
         }
     } catch (Throwable $e) {
         error_log('user_activity_ensure_table frontend_url: ' . $e->getMessage());
+    }
+
+    user_activity_repair_id_column($pdo);
+    user_activity_ensure_index($pdo, 'idx_created', 'ALTER TABLE user_activity_log ADD INDEX idx_created (created_at)');
+    user_activity_ensure_index($pdo, 'idx_user_created', 'ALTER TABLE user_activity_log ADD INDEX idx_user_created (user_id, created_at)');
+    user_activity_ensure_index($pdo, 'idx_action', 'ALTER TABLE user_activity_log ADD INDEX idx_action (action)');
+}
+
+/**
+ * Column names present on user_activity_log, lowercased.
+ *
+ * @return array<string, true>
+ */
+function user_activity_table_columns(PDO $pdo): array
+{
+    $cols = [];
+    foreach ($pdo->query('SHOW COLUMNS FROM user_activity_log') as $row) {
+        $cols[strtolower((string)($row['Field'] ?? ''))] = true;
+    }
+    return $cols;
+}
+
+function user_activity_select_list(PDO $pdo, array $wanted): string
+{
+    $have = user_activity_table_columns($pdo);
+    $cols = [];
+    foreach ($wanted as $col) {
+        if (isset($have[strtolower($col)])) {
+            $cols[] = $col;
+        }
+    }
+    if (!$cols) {
+        $cols[] = isset($have['action']) ? 'action' : '*';
+    }
+    return implode(', ', $cols);
+}
+
+function user_activity_order_sql(PDO $pdo): string
+{
+    $have = user_activity_table_columns($pdo);
+    $parts = [];
+    if (isset($have['created_at'])) {
+        $parts[] = 'created_at DESC';
+    }
+    if (isset($have['id'])) {
+        $parts[] = 'id DESC';
+    }
+    return $parts ? (' ORDER BY ' . implode(', ', $parts)) : '';
+}
+
+/**
+ * Existing installs were created without a primary key, so every id stayed 0
+ * and ORDER BY id could not page the log. Rebuild id when it is not unique.
+ */
+function user_activity_repair_id_column(PDO $pdo): void
+{
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM user_activity_log WHERE Field = 'id'")->fetch(PDO::FETCH_ASSOC);
+        if (!$col) {
+            $pdo->exec('ALTER TABLE user_activity_log ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST');
+            return;
+        }
+        $extra = strtolower((string)($col['Extra'] ?? ''));
+        $pk = $pdo->query("SHOW INDEX FROM user_activity_log WHERE Key_name = 'PRIMARY'")->fetch(PDO::FETCH_ASSOC);
+        if ($pk && strpos($extra, 'auto_increment') !== false) {
+            return;
+        }
+        $dup = (int)$pdo->query('SELECT COUNT(*) - COUNT(DISTINCT id) FROM user_activity_log')->fetchColumn();
+        if ($dup > 0 || !$pk) {
+            $pdo->exec('ALTER TABLE user_activity_log DROP COLUMN id');
+            $pdo->exec('ALTER TABLE user_activity_log ADD COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST');
+            return;
+        }
+        $pdo->exec('ALTER TABLE user_activity_log MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT');
+    } catch (Throwable $e) {
+        error_log('user_activity_repair_id_column: ' . $e->getMessage());
+    }
+}
+
+function user_activity_ensure_index(PDO $pdo, string $name, string $ddl): void
+{
+    try {
+        $stmt = $pdo->prepare('SHOW INDEX FROM user_activity_log WHERE Key_name = ?');
+        $stmt->execute([$name]);
+        if ($stmt->fetch(PDO::FETCH_ASSOC)) {
+            return;
+        }
+        $pdo->exec($ddl);
+    } catch (Throwable $e) {
+        error_log('user_activity_ensure_index ' . $name . ': ' . $e->getMessage());
     }
 }
 

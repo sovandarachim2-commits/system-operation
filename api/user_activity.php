@@ -7,6 +7,7 @@ require_once __DIR__ . '/../user_activity_lib.php';
 
 require_role_or_permission(['admin'], 'users_activity.view', 'sr_user_activity.view');
 
+try {
 $pdo = get_db_connection();
 user_activity_ensure_table($pdo);
 
@@ -101,8 +102,23 @@ if ($page > $totalPages) {
 }
 $offset = ($page - 1) * $perPage;
 
-$sql = 'SELECT user_id, user_name, action, details, context, ip_address, device, device_name, device_model, user_agent, request_uri, frontend_url, created_at'
-    . ' FROM user_activity_log' . $whereSql . ' ORDER BY id DESC LIMIT ' . (int)$perPage . ' OFFSET ' . (int)$offset;
+$selectList = user_activity_select_list($pdo, [
+    'user_id',
+    'user_name',
+    'action',
+    'details',
+    'ip_address',
+    'device',
+    'device_name',
+    'device_model',
+    'user_agent',
+    'request_uri',
+    'frontend_url',
+    'created_at',
+]);
+$sql = 'SELECT ' . $selectList
+    . ' FROM user_activity_log' . $whereSql . user_activity_order_sql($pdo)
+    . ' LIMIT ' . (int)$perPage . ' OFFSET ' . (int)$offset;
 
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
@@ -175,3 +191,7 @@ api_json([
         'total_pages' => $totalPages,
     ],
 ]);
+} catch (Throwable $e) {
+    error_log('api/user_activity.php: ' . $e->getMessage());
+    api_error('Unable to load activity log. ' . $e->getMessage(), 500);
+}

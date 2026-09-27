@@ -7,10 +7,9 @@ require_role_or_permission(['admin'], 'sr_month_end_closing.view', 'sr_income_st
 const MEC_STEPS = [
     'sales' => 'Sales Closing',
     'receivable' => 'Accounts Receivable',
-    'purchase' => 'Purchase / Supplier Closing',
     'payable' => 'Accounts Payable',
+    'purchase' => 'Purchase / Supplier Closing',
     'cash_bank' => 'Cash & Bank Reconciliation',
-    'inventory' => 'Inventory Reconciliation',
     'marketing_stock' => 'Marketing Stock Reconciliation',
     'adjustments' => 'Stock Adjustments',
     'expenses' => 'Expense Closing',
@@ -139,7 +138,7 @@ function mec_online_print_join_sql(PDO $pdo): string
     if (!api_table_exists($pdo, 'print_jobs')) {
         return '';
     }
-    return 'LEFT JOIN (
+    return 'INNER JOIN (
         SELECT order_id, MAX(printed_at) AS printed_at
         FROM print_jobs
         GROUP BY order_id
@@ -149,7 +148,7 @@ function mec_online_print_join_sql(PDO $pdo): string
 function mec_online_print_date_expr(PDO $pdo): string
 {
     if (api_table_exists($pdo, 'print_jobs')) {
-        return 'COALESCE(pj.printed_at, o.created_at)';
+        return 'pj.printed_at';
     }
     $expr = mec_date_expr($pdo, 'orders', ['payment_activity_date', 'payment_date', 'order_date', 'created_at']);
     if (!$expr) {
@@ -559,13 +558,10 @@ function mec_receivable_payment_status(float $paid, float $outstanding, string $
     return 'Unpaid';
 }
 
-function mec_receivable_ar_status(string $dueDate, float $outstanding): string
+function mec_receivable_ar_status(float $outstanding): string
 {
     if ($outstanding <= 0.004) {
         return 'Paid';
-    }
-    if (mec_days_overdue($dueDate) > 0) {
-        return 'Overdue';
     }
     return 'Open';
 }
@@ -631,19 +627,23 @@ function mec_dealer_receivable_filter_sql(PDO $pdo): string
 
 function mec_sum_receivable_outstanding(PDO $pdo, string $from, string $to, bool $includePrevious = false): array
 {
-    $totals = ['online' => 0.0, 'offline' => 0.0, 'dealer' => 0.0];
+    $totals = ['online' => 0.0, 'offline' => 0.0, 'dealer' => 0.0, 'original' => 0.0, 'paid' => 0.0];
 
     if (api_table_exists($pdo, 'orders')) {
         $onlineDateExpr = mec_online_print_date_expr($pdo);
         $onlineJoin = mec_online_print_join_sql($pdo);
         $onlineAmountExpr = mec_online_amount_expr($pdo);
         $outstandingExpr = "CASE WHEN COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid' THEN 0 ELSE $onlineAmountExpr END";
+        $paidExpr = "CASE WHEN COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid' THEN $onlineAmountExpr ELSE 0 END";
         $dateClause = $includePrevious ? "DATE($onlineDateExpr) <= ?" : "DATE($onlineDateExpr) BETWEEN ? AND ?";
         $params = $includePrevious ? [$to] : [$from, $to];
-        $sql = "SELECT COALESCE(SUM($outstandingExpr), 0) FROM orders o $onlineJoin WHERE $dateClause AND " . mec_online_receivable_filter_sql($pdo);
+        $sql = "SELECT COALESCE(SUM($outstandingExpr), 0) AS outstanding, COALESCE(SUM($onlineAmountExpr), 0) AS original, COALESCE(SUM($paidExpr), 0) AS paid FROM orders o $onlineJoin WHERE $dateClause AND " . mec_online_receivable_filter_sql($pdo);
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
-        $totals['online'] = (float)$stmt->fetchColumn();
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $totals['online'] = (float)($row['outstanding'] ?? 0);
+        $totals['original'] += (float)($row['original'] ?? 0);
+        $totals['paid'] += (float)($row['paid'] ?? 0);
     }
 
     if (api_table_exists($pdo, 'offline_sale_orders')) {
@@ -651,20 +651,26 @@ function mec_sum_receivable_outstanding(PDO $pdo, string $from, string $to, bool
         $outstandingExpr = 'GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.received_amount, 0), 0)';
         $dateClause = $includePrevious ? "DATE($offlineDateExpr) <= ?" : "DATE($offlineDateExpr) BETWEEN ? AND ?";
         $params = $includePrevious ? [$to] : [$from, $to];
-        $sql = "SELECT COALESCE(SUM($outstandingExpr), 0) FROM offline_sale_orders o WHERE $dateClause AND " . mec_offline_receivable_filter_sql($pdo) . " AND $outstandingExpr > 0.004";
+        $sql = "SELECT COALESCE(SUM($outstandingExpr), 0) AS outstanding, COALESCE(SUM(COALESCE(o.total_amount, 0)), 0) AS original, COALESCE(SUM(COALESCE(o.received_amount, 0)), 0) AS paid FROM offline_sale_orders o WHERE $dateClause AND " . mec_offline_receivable_filter_sql($pdo) . " AND $outstandingExpr > 0.004";
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
-        $totals['offline'] = (float)$stmt->fetchColumn();
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $totals['offline'] = (float)($row['outstanding'] ?? 0);
+        $totals['original'] += (float)($row['original'] ?? 0);
+        $totals['paid'] += (float)($row['paid'] ?? 0);
     }
 
     if (api_table_exists($pdo, 'dealer_orders')) {
         $outstandingExpr = 'GREATEST(COALESCE(o.balance_amount, COALESCE(o.grand_total, 0) - COALESCE(o.paid_amount, 0)), 0)';
         $dateClause = $includePrevious ? "DATE(o.order_date) <= ?" : "DATE(o.order_date) BETWEEN ? AND ?";
         $params = $includePrevious ? [$to] : [$from, $to];
-        $sql = "SELECT COALESCE(SUM($outstandingExpr), 0) FROM dealer_orders o WHERE $dateClause AND " . mec_dealer_receivable_filter_sql($pdo) . " AND $outstandingExpr > 0.004";
+        $sql = "SELECT COALESCE(SUM($outstandingExpr), 0) AS outstanding, COALESCE(SUM(COALESCE(o.grand_total, 0)), 0) AS original, COALESCE(SUM(COALESCE(o.paid_amount, 0)), 0) AS paid FROM dealer_orders o WHERE $dateClause AND " . mec_dealer_receivable_filter_sql($pdo) . " AND $outstandingExpr > 0.004";
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
-        $totals['dealer'] = (float)$stmt->fetchColumn();
+        $row = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $totals['dealer'] = (float)($row['outstanding'] ?? 0);
+        $totals['original'] += (float)($row['original'] ?? 0);
+        $totals['paid'] += (float)($row['paid'] ?? 0);
     }
 
     return $totals;
@@ -677,15 +683,21 @@ function mec_receivable_summary(array $rows): array
     $overdueCount = 0;
     $totalOutstanding = 0.0;
     $grossOriginal = 0.0;
+    $paymentsReceived = 0.0;
     $overdueAmount = 0.0;
     $onlineCount = 0;
     $offlineCount = 0;
     $dealerCount = 0;
+    $onlineOutstanding = 0.0;
+    $offlineOutstanding = 0.0;
+    $dealerOutstanding = 0.0;
     foreach ($rows as $row) {
         $out = (float)($row['outstanding'] ?? 0);
         $orig = (float)($row['original_amount'] ?? $out);
+        $paid = (float)($row['paid'] ?? 0);
         $totalOutstanding += $out;
         $grossOriginal += $orig;
+        $paymentsReceived += $paid;
         $paymentStatus = (string)($row['payment_status'] ?? '');
         if ($paymentStatus === 'Unpaid') {
             $unpaid++;
@@ -700,10 +712,13 @@ function mec_receivable_summary(array $rows): array
         $source = (string)($row['source'] ?? '');
         if ($source === 'Online') {
             $onlineCount++;
+            $onlineOutstanding += $out;
         } elseif ($source === 'Offline') {
             $offlineCount++;
+            $offlineOutstanding += $out;
         } elseif ($source === 'Dealer') {
             $dealerCount++;
+            $dealerOutstanding += $out;
         }
     }
     return [
@@ -712,18 +727,21 @@ function mec_receivable_summary(array $rows): array
         'partial_count' => $partial,
         'total_outstanding' => $totalOutstanding,
         'gross_original' => $grossOriginal,
+        'payments_received' => $paymentsReceived,
         'overdue_count' => $overdueCount,
         'overdue_amount' => $overdueAmount,
         'online_count' => $onlineCount,
         'offline_count' => $offlineCount,
         'dealer_count' => $dealerCount,
+        'online_outstanding' => $onlineOutstanding,
+        'offline_outstanding' => $offlineOutstanding,
+        'dealer_outstanding' => $dealerOutstanding,
     ];
 }
 
 function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePrevious = false): array
 {
     $rows = [];
-    $perSourceLimit = 150;
 
     if (api_table_exists($pdo, 'dealer_orders')) {
         $dealerRows = mec_fetch_rows(
@@ -733,7 +751,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 COALESCE(NULLIF(d.name, ''), NULLIF(o.dealer_name, ''), CONCAT('Dealer #', o.dealer_id)) AS customer,
                 o.order_code AS invoice,
                 DATE(o.order_date) AS invoice_date,
-                DATE_ADD(DATE(o.order_date), INTERVAL 30 DAY) AS due_date,
+                DATE(o.created_at) AS recorded_date,
                 COALESCE(o.grand_total, 0) AS original_amount,
                 COALESCE(o.paid_amount, 0) AS paid,
                 GREATEST(COALESCE(o.balance_amount, COALESCE(o.grand_total, 0) - COALESCE(o.paid_amount, 0)), 0) AS outstanding,
@@ -743,8 +761,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             WHERE " . ($includePrevious ? "DATE(o.order_date) <= ?" : "DATE(o.order_date) BETWEEN ? AND ?") . "
               AND " . mec_dealer_receivable_filter_sql($pdo) . "
             HAVING outstanding > 0.004
-            ORDER BY due_date ASC
-            LIMIT $perSourceLimit",
+            ORDER BY invoice_date DESC",
             $includePrevious ? [$to] : [$from, $to]
         );
         foreach ($dealerRows as $row) {
@@ -755,12 +772,12 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 'customer' => (string)$row['customer'],
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
-                'due_date' => (string)$row['due_date'],
+                'recorded_date' => (string)$row['recorded_date'],
                 'original_amount' => (float)$row['original_amount'],
                 'paid' => $paid,
                 'outstanding' => $outstanding,
                 'payment_status' => mec_receivable_payment_status($paid, $outstanding, (string)$row['payment_status_raw']),
-                'status' => mec_receivable_ar_status((string)$row['due_date'], $outstanding),
+                'status' => mec_receivable_ar_status($outstanding),
             ];
         }
     }
@@ -774,7 +791,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 COALESCE(NULLIF(o.customer_name, ''), 'Walk-in Customer') AS customer,
                 COALESCE(o.order_code, CONCAT('OFF-', o.id)) AS invoice,
                 DATE($offlineDateExpr) AS invoice_date,
-                DATE_ADD(DATE($offlineDateExpr), INTERVAL 30 DAY) AS due_date,
+                DATE(o.created_at) AS recorded_date,
                 COALESCE(o.total_amount, 0) AS original_amount,
                 COALESCE(o.received_amount, 0) AS paid,
                 GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.received_amount, 0), 0) AS outstanding,
@@ -783,8 +800,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             WHERE " . ($includePrevious ? "DATE($offlineDateExpr) <= ?" : "DATE($offlineDateExpr) BETWEEN ? AND ?") . "
               AND " . mec_offline_receivable_filter_sql($pdo) . "
             HAVING outstanding > 0.004
-            ORDER BY due_date ASC
-            LIMIT $perSourceLimit",
+            ORDER BY invoice_date DESC",
             $includePrevious ? [$to] : [$from, $to]
         );
         foreach ($offlineRows as $row) {
@@ -795,12 +811,12 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 'customer' => (string)$row['customer'],
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
-                'due_date' => (string)$row['due_date'],
+                'recorded_date' => (string)$row['recorded_date'],
                 'original_amount' => (float)$row['original_amount'],
                 'paid' => $paid,
                 'outstanding' => $outstanding,
                 'payment_status' => mec_receivable_payment_status($paid, $outstanding, (string)$row['payment_status_raw']),
-                'status' => mec_receivable_ar_status((string)$row['due_date'], $outstanding),
+                'status' => mec_receivable_ar_status($outstanding),
             ];
         }
     }
@@ -817,7 +833,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 COALESCE(NULLIF(o.customer_name, ''), NULLIF(o.phone, ''), 'Online Customer') AS customer,
                 COALESCE(o.order_code, CONCAT('ON-', o.id)) AS invoice,
                 DATE($onlineDateExpr) AS invoice_date,
-                DATE_ADD(DATE($onlineDateExpr), INTERVAL 30 DAY) AS due_date,
+                DATE(o.created_at) AS recorded_date,
                 $onlineAmountExpr AS original_amount,
                 CASE
                     WHEN COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid' THEN $onlineAmountExpr
@@ -833,8 +849,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             WHERE " . ($includePrevious ? "DATE($onlineDateExpr) <= ?" : "DATE($onlineDateExpr) BETWEEN ? AND ?") . "
               AND $onlineReceivableFilter
             HAVING outstanding > 0.004
-            ORDER BY invoice_date DESC, due_date ASC
-            LIMIT $perSourceLimit",
+            ORDER BY invoice_date DESC",
             $includePrevious ? [$to] : [$from, $to]
         );
         foreach ($onlineRows as $row) {
@@ -845,12 +860,12 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 'customer' => (string)$row['customer'],
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
-                'due_date' => (string)$row['due_date'],
+                'recorded_date' => (string)$row['recorded_date'],
                 'original_amount' => (float)$row['original_amount'],
                 'paid' => $paid,
                 'outstanding' => $outstanding,
                 'payment_status' => mec_receivable_payment_status($paid, $outstanding, (string)$row['payment_status_raw']),
-                'status' => mec_receivable_ar_status((string)$row['due_date'], $outstanding),
+                'status' => mec_receivable_ar_status($outstanding),
             ];
         }
     }
@@ -867,17 +882,267 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
     return $rows;
 }
 
-function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = false): array
+function mec_sales_detail_row(string $channel, array $row): array
+{
+    return [
+        'channel' => $channel,
+        'printed_date' => (string)($row['printed_date'] ?? ''),
+        'order_code' => (string)($row['order_code'] ?? ''),
+        'customer' => (string)($row['customer'] ?? ''),
+        'phone' => (string)($row['phone'] ?? ''),
+        'seller' => (string)($row['seller'] ?? ''),
+        'product' => (string)($row['product'] ?? ''),
+        'delivery' => (string)($row['delivery'] ?? ''),
+        'delivery_by' => (string)($row['delivery_by'] ?? ''),
+        'payment' => (string)($row['payment'] ?? ''),
+        'status' => (string)($row['status'] ?? ''),
+        'items' => (float)($row['items'] ?? 0),
+        'amount' => (float)($row['amount'] ?? 0),
+    ];
+}
+
+function mec_delivery_by_expr(PDO $pdo, string $codeExpr): string
+{
+    if (!api_table_exists($pdo, 'out_items') || !mec_has($pdo, 'out_items', 'inv') || !mec_has($pdo, 'out_items', 'delivery_by')) {
+        return "''";
+    }
+    return "COALESCE((
+        SELECT MAX(oi2.delivery_by)
+        FROM out_items oi2
+        WHERE oi2.inv = $codeExpr
+          AND oi2.delivery_by IS NOT NULL
+          AND TRIM(oi2.delivery_by) <> ''
+    ), '')";
+}
+
+function mec_qty_label_sql(string $qtyExpr): string
+{
+    return "TRIM(TRAILING '.' FROM TRIM(TRAILING '0' FROM CAST(ROUND($qtyExpr, 2) AS CHAR)))";
+}
+
+function mec_sale_product_line_expr(string $labelExpr, string $qtyExpr, string $amountExpr): string
+{
+    $qty = mec_qty_label_sql($qtyExpr);
+    $money = "CONCAT('$', FORMAT(COALESCE($amountExpr, 0), 2))";
+    return "CONCAT($labelExpr, ' (', $qty, 'x, ', $money, ')')";
+}
+
+function mec_delivery_by_join(PDO $pdo, string $codeExpr): array
+{
+    if (!api_table_exists($pdo, 'out_items') || !mec_has($pdo, 'out_items', 'inv') || !mec_has($pdo, 'out_items', 'delivery_by')) {
+        return ['', "''"];
+    }
+    return [
+        "LEFT JOIN (
+            SELECT inv, MAX(delivery_by) AS delivery_by
+            FROM out_items
+            WHERE delivery_by IS NOT NULL AND TRIM(delivery_by) <> ''
+            GROUP BY inv
+        ) ship ON ship.inv = $codeExpr",
+        'COALESCE(ship.delivery_by, \'\')',
+    ];
+}
+
+function mec_sales_order_details(PDO $pdo, string $from, string $to, string $onlineActive, string $offlineActive, string $dealerActive): array
+{
+    try {
+        $pdo->exec('SET SESSION group_concat_max_len = 8192');
+    } catch (Throwable $ignored) {
+    }
+    $rows = [];
+
+    if (api_table_exists($pdo, 'orders')) {
+        $dateExpr = mec_online_print_date_expr($pdo);
+        $join = mec_online_print_join_sql($pdo);
+        $amount = mec_online_amount_expr($pdo);
+        $code = mec_has($pdo, 'orders', 'order_code') ? 'o.order_code' : "CONCAT('ON-', o.id)";
+        $customer = mec_has($pdo, 'orders', 'customer_name') ? "COALESCE(o.customer_name, '')" : "''";
+        $phone = mec_has($pdo, 'orders', 'phone') ? "COALESCE(o.phone, '')" : "''";
+        $seller = "''";
+        if (api_table_exists($pdo, 'users') && mec_has($pdo, 'orders', 'seller_id')) {
+            $join .= ' LEFT JOIN users u ON u.id = o.seller_id';
+            $seller = "COALESCE(NULLIF(TRIM(u.name), ''), u.username, '')";
+        }
+        $delivery = "''";
+        if (api_table_exists($pdo, 'delivery_types') && mec_has($pdo, 'orders', 'delivery_type_id')) {
+            $join .= ' LEFT JOIN delivery_types dt ON dt.id = o.delivery_type_id';
+            $delivery = "COALESCE(dt.name, '')";
+            if (api_table_exists($pdo, 'delivery_costs') && mec_has($pdo, 'orders', 'delivery_cost_id')) {
+                $join .= ' LEFT JOIN delivery_costs dc ON dc.id = o.delivery_cost_id';
+                $delivery = "TRIM(CONCAT(COALESCE(dt.name, ''), CASE WHEN COALESCE(dc.label, '') <> '' THEN CONCAT(' (', dc.label, ')') ELSE '' END))";
+            }
+        }
+        $product = "''";
+        $items = '0';
+        if (api_table_exists($pdo, 'order_items')) {
+            $name = api_table_exists($pdo, 'products')
+                ? "COALESCE(NULLIF(TRIM(p.name), ''), 'Item')"
+                : "'Item'";
+            $skuPrefix = api_table_exists($pdo, 'products') && mec_has($pdo, 'products', 'sku')
+                ? "CASE WHEN COALESCE(NULLIF(TRIM(p.sku), ''), '') <> '' THEN CONCAT(TRIM(p.sku), '-') ELSE '' END"
+                : "''";
+            $productJoin = api_table_exists($pdo, 'products') ? 'LEFT JOIN products p ON p.id = oi.product_id' : '';
+            $line = mec_sale_product_line_expr("CONCAT($skuPrefix, $name)", 'oi.quantity', mec_has($pdo, 'order_items', 'line_total') ? 'oi.line_total' : '0');
+            $join .= " LEFT JOIN (
+                SELECT oi.order_id,
+                       GROUP_CONCAT($line ORDER BY oi.id SEPARATOR '\\n') AS product,
+                       COALESCE(SUM(oi.quantity), 0) AS items
+                FROM order_items oi
+                $productJoin
+                GROUP BY oi.order_id
+            ) items ON items.order_id = o.id";
+            $product = 'items.product';
+            $items = 'items.items';
+        }
+        $payment = mec_has($pdo, 'orders', 'payment_method')
+            ? "CASE WHEN COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid' THEN COALESCE(NULLIF(TRIM(o.payment_method), ''), 'Paid') ELSE 'Unpaid' END"
+            : "CASE WHEN COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid' THEN 'Paid' ELSE 'Unpaid' END";
+        $status = "CASE
+            WHEN COALESCE(o.is_cancelled, 0) = 1 THEN 'Cancel'
+            WHEN COALESCE(o.is_returned, 0) = 1 THEN 'Return'
+            WHEN COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid' THEN 'Paid'
+            ELSE 'Unpaid'
+        END";
+        [$shipJoin, $deliveryBy] = mec_delivery_by_join($pdo, $code);
+        $join .= ' ' . $shipJoin;
+        $onlineRows = mec_fetch_rows(
+            $pdo,
+            "SELECT DATE($dateExpr) AS printed_date, $code AS order_code, $customer AS customer, $phone AS phone, $seller AS seller,
+                    COALESCE($product, '') AS product, COALESCE($delivery, '') AS delivery, $deliveryBy AS delivery_by,
+                    $payment AS payment, $status AS status, COALESCE($items, 0) AS items, COALESCE($amount, 0) AS amount
+             FROM orders o $join
+             WHERE DATE($dateExpr) BETWEEN ? AND ? AND ($onlineActive)
+             ORDER BY $dateExpr DESC, o.id DESC",
+            [$from, $to]
+        );
+        foreach ($onlineRows as $row) {
+            $rows[] = mec_sales_detail_row('online', $row);
+        }
+    }
+
+    if (api_table_exists($pdo, 'offline_sale_orders')) {
+        $dateCol = mec_pick($pdo, 'offline_sale_orders', ['sale_date', 'order_date', 'created_at']);
+        $amountCol = mec_pick($pdo, 'offline_sale_orders', ['total_amount', 'grand_total', 'amount']);
+        if ($dateCol && $amountCol) {
+            $dateExpr = 'o.' . api_quote_identifier($dateCol);
+            $code = mec_has($pdo, 'offline_sale_orders', 'order_code') ? 'o.order_code' : "CONCAT('OFF-', o.id)";
+            $customer = mec_has($pdo, 'offline_sale_orders', 'customer_name') ? "COALESCE(o.customer_name, '')" : "''";
+            $phone = mec_has($pdo, 'offline_sale_orders', 'phone') ? "COALESCE(o.phone, '')" : "''";
+            $join = '';
+            $seller = "''";
+            if (api_table_exists($pdo, 'offline_teams') && mec_has($pdo, 'offline_sale_orders', 'team_id')) {
+                $join .= ' LEFT JOIN offline_teams t ON t.id = o.team_id';
+                $seller = "COALESCE(NULLIF(TRIM(t.name), ''), '')";
+            }
+            if (api_table_exists($pdo, 'users') && mec_has($pdo, 'offline_sale_orders', 'seller_id')) {
+                $join .= ' LEFT JOIN users ou ON ou.id = o.seller_id';
+                $seller = $seller === "''"
+                    ? "COALESCE(NULLIF(TRIM(ou.name), ''), ou.username, '')"
+                    : "COALESCE(NULLIF(TRIM(t.name), ''), NULLIF(TRIM(ou.name), ''), ou.username, '')";
+            }
+            $product = "''";
+            $items = '0';
+            if (api_table_exists($pdo, 'offline_sale_order_items')) {
+                $line = mec_sale_product_line_expr("COALESCE(NULLIF(TRIM(i.product_name), ''), 'Item')", 'i.quantity', mec_has($pdo, 'offline_sale_order_items', 'line_total') ? 'i.line_total' : '0');
+                $join .= " LEFT JOIN (
+                    SELECT i.order_id,
+                           GROUP_CONCAT($line ORDER BY i.id SEPARATOR '\\n') AS product,
+                           COALESCE(SUM(i.quantity), 0) AS items
+                    FROM offline_sale_order_items i
+                    GROUP BY i.order_id
+                ) items ON items.order_id = o.id";
+                $product = 'items.product';
+                $items = 'items.items';
+            }
+            [$shipJoin, $deliveryBy] = mec_delivery_by_join($pdo, $code);
+            $join .= ' ' . $shipJoin;
+            $payment = "CASE
+                WHEN LOWER(COALESCE(o.status, '')) = 'paid' OR (COALESCE(o.total_amount, 0) > 0 AND COALESCE(o.received_amount, 0) >= COALESCE(o.total_amount, 0))
+                    THEN COALESCE(NULLIF(TRIM(o.payment_method), ''), 'Paid')
+                WHEN LOWER(COALESCE(o.status, '')) = 'partial' OR (COALESCE(o.received_amount, 0) > 0 AND COALESCE(o.received_amount, 0) < COALESCE(o.total_amount, 0))
+                    THEN COALESCE(NULLIF(TRIM(o.payment_method), ''), 'Partial')
+                ELSE 'Unpaid'
+            END";
+            $offlineDetailActive = str_replace('COALESCE(status,', 'COALESCE(o.status,', $offlineActive);
+            $offlineRows = mec_fetch_rows(
+                $pdo,
+                "SELECT DATE($dateExpr) AS printed_date, $code AS order_code, $customer AS customer, $phone AS phone, $seller AS seller,
+                        COALESCE($product, '') AS product, 'Offline' AS delivery, $deliveryBy AS delivery_by,
+                        $payment AS payment, COALESCE(o.status, '') AS status, COALESCE($items, 0) AS items,
+                        COALESCE(o." . api_quote_identifier($amountCol) . ", 0) AS amount
+                 FROM offline_sale_orders o $join
+                 WHERE DATE($dateExpr) BETWEEN ? AND ? AND ($offlineDetailActive)
+                 ORDER BY $dateExpr DESC, o.id DESC",
+                [$from, $to]
+            );
+            foreach ($offlineRows as $row) {
+                $rows[] = mec_sales_detail_row('offline', $row);
+            }
+        }
+    }
+
+    if (api_table_exists($pdo, 'dealer_orders')) {
+        $dateCol = mec_pick($pdo, 'dealer_orders', ['order_date', 'created_at']);
+        $amountCol = mec_pick($pdo, 'dealer_orders', ['grand_total', 'total_amount', 'amount']);
+        if ($dateCol && $amountCol) {
+            $dateExpr = 'o.' . api_quote_identifier($dateCol);
+            $code = mec_has($pdo, 'dealer_orders', 'order_code') ? 'o.order_code' : "CONCAT('DL-', o.id)";
+            $customer = mec_has($pdo, 'dealer_orders', 'dealer_name') ? "COALESCE(o.dealer_name, '')" : "''";
+            $phone = mec_has($pdo, 'dealer_orders', 'phone') ? "COALESCE(o.phone, '')" : "''";
+            $seller = mec_has($pdo, 'dealer_orders', 'sales_person') ? "COALESCE(o.sales_person, '')" : "''";
+            $delivery = mec_has($pdo, 'dealer_orders', 'delivery_method') ? "COALESCE(NULLIF(TRIM(o.delivery_method), ''), '')" : "''";
+            $product = "''";
+            $items = '0';
+            $join = '';
+            if (api_table_exists($pdo, 'dealer_order_items')) {
+                $line = mec_sale_product_line_expr("COALESCE(NULLIF(TRIM(i.product_name), ''), 'Item')", 'i.quantity', mec_has($pdo, 'dealer_order_items', 'line_total') ? 'i.line_total' : '0');
+                $join .= " LEFT JOIN (
+                    SELECT i.order_id,
+                           GROUP_CONCAT($line ORDER BY i.id SEPARATOR '\\n') AS product,
+                           COALESCE(SUM(i.quantity), 0) AS items
+                    FROM dealer_order_items i
+                    GROUP BY i.order_id
+                ) items ON items.order_id = o.id";
+                $product = 'items.product';
+                $items = 'items.items';
+            }
+            [$shipJoin, $deliveryBy] = mec_delivery_by_join($pdo, $code);
+            $join .= ' ' . $shipJoin;
+            $payment = "CASE
+                WHEN LOWER(COALESCE(o.payment_status, '')) = 'paid' OR (COALESCE(o.grand_total, 0) > 0 AND COALESCE(o.paid_amount, 0) >= COALESCE(o.grand_total, 0))
+                    THEN COALESCE(NULLIF(TRIM(o.payment_method), ''), 'Paid')
+                WHEN LOWER(COALESCE(o.payment_status, '')) = 'partial' OR COALESCE(o.paid_amount, 0) > 0
+                    THEN COALESCE(NULLIF(TRIM(o.payment_method), ''), 'Partial')
+                ELSE 'Unpaid'
+            END";
+            $dealerDetailActive = str_replace('COALESCE(status,', 'COALESCE(o.status,', $dealerActive);
+            $dealerRows = mec_fetch_rows(
+                $pdo,
+                "SELECT DATE($dateExpr) AS printed_date, $code AS order_code, $customer AS customer, $phone AS phone, $seller AS seller,
+                        COALESCE($product, '') AS product, $delivery AS delivery, $deliveryBy AS delivery_by,
+                        $payment AS payment, COALESCE(o.status, '') AS status, COALESCE($items, 0) AS items,
+                        COALESCE(o." . api_quote_identifier($amountCol) . ", 0) AS amount
+                 FROM dealer_orders o $join
+                 WHERE DATE($dateExpr) BETWEEN ? AND ? AND ($dealerDetailActive)
+                 ORDER BY $dateExpr DESC, o.id DESC",
+                [$from, $to]
+            );
+            foreach ($dealerRows as $row) {
+                $rows[] = mec_sales_detail_row('dealer', $row);
+            }
+        }
+    }
+
+    return $rows;
+}
+
+function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = false, bool $includePreviousAp = false): array
 {
     $from = mec_month_start($month);
     $to = mec_month_end($month);
 
-    $onlineSales = mec_sum_online_between($pdo, ['total_amount', 'grand_total', 'amount'], $from, $to, 'COALESCE(o.is_cancelled, 0) = 0');
-    $discounts = mec_sum_online_between($pdo, ['discount', 'discount_amount'], $from, $to, 'COALESCE(o.is_cancelled, 0) = 0');
     $cancelled = mec_count_online_between($pdo, $from, $to, 'COALESCE(o.is_cancelled, 0) = 1 OR LOWER(COALESCE(o.status, \'\')) = \'cancelled\'');
     $returned = mec_count_online_between($pdo, $from, $to, 'COALESCE(o.is_returned, 0) = 1 OR LOWER(COALESCE(o.status, \'\')) LIKE \'%return%\'');
-    $offlineSales = mec_sum_between($pdo, 'offline_sale_orders', ['total_amount', 'grand_total', 'amount'], ['order_date', 'sale_date', 'created_at'], $from, $to);
-    $dealerSales = mec_sum_between($pdo, 'dealer_orders', ['total_amount', 'grand_total', 'amount'], ['order_date', 'created_at'], $from, $to);
 
     $operationalPendingStatuses = mec_online_pending_statuses();
     $onlineActive = "COALESCE(o.is_cancelled, 0) = 0 AND COALESCE(o.is_returned, 0) = 0 AND LOWER(COALESCE(o.status, '')) NOT IN ('cancel', 'cancelled', 'canceled', 'return', 'returned', 'draft')";
@@ -896,6 +1161,10 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
     $offlineUnpaid = mec_count_between($pdo, 'offline_sale_orders', ['order_date', 'sale_date', 'created_at'], $from, $to, $offlineActive . " AND COALESCE(total_amount,0) > 0 AND COALESCE(received_amount,0) <= 0 AND " . mec_status_in($pdo, 'status', ['unpaid', 'credit']));
 
     $dealerActive = "LOWER(COALESCE(status,'')) NOT IN ('cancel','cancelled','canceled','return','returned')";
+    $onlineSales = mec_sum_online_between($pdo, ['total_amount', 'grand_total', 'amount'], $from, $to, $onlineActive);
+    $discounts = mec_sum_online_between($pdo, ['discount', 'discount_amount'], $from, $to, $onlineActive);
+    $offlineSales = mec_sum_between($pdo, 'offline_sale_orders', ['total_amount', 'grand_total', 'amount'], ['order_date', 'sale_date', 'created_at'], $from, $to, $offlineActive);
+    $dealerSales = mec_sum_between($pdo, 'dealer_orders', ['total_amount', 'grand_total', 'amount'], ['order_date', 'created_at'], $from, $to, $dealerActive);
     $dealerOperationalPending = mec_count_between($pdo, 'dealer_orders', ['order_date', 'created_at'], $from, $to, $dealerActive . ' AND (' . mec_status_in($pdo, 'status', $operationalPendingStatuses) . " OR TRIM(COALESCE(status,''))='')");
     $dealerCompleted = mec_count_between($pdo, 'dealer_orders', ['order_date', 'created_at'], $from, $to, $dealerActive . ' AND NOT (' . mec_status_in($pdo, 'status', $operationalPendingStatuses) . " OR TRIM(COALESCE(status,''))='')");
     $dealerPaid = mec_count_between($pdo, 'dealer_orders', ['order_date', 'created_at'], $from, $to, $dealerActive . ' AND ' . mec_status_in($pdo, 'payment_status', ['paid']));
@@ -944,18 +1213,7 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
     $unpaidCreditOrders = $onlineUnpaid + $offlineUnpaid + $dealerUnpaid;
 
     $receivableRows = mec_receivable_rows($pdo, $from, $to, $includePreviousAr);
-    $receivableOutstanding = mec_sum_receivable_outstanding($pdo, $from, $to, $includePreviousAr);
     $receivableSummary = mec_receivable_summary($receivableRows);
-    $receivableSummary['online_count'] = $onlinePartial + $onlineUnpaid;
-    $receivableSummary['offline_count'] = $offlinePartial + $offlineUnpaid;
-    $receivableSummary['dealer_count'] = $dealerPartial + $dealerUnpaid;
-    $receivableSummary['online_outstanding'] = $receivableOutstanding['online'];
-    $receivableSummary['offline_outstanding'] = $receivableOutstanding['offline'];
-    $receivableSummary['dealer_outstanding'] = $receivableOutstanding['dealer'];
-    $receivableSummary['invoice_count'] = $receivableSummary['online_count'] + $receivableSummary['offline_count'] + $receivableSummary['dealer_count'];
-    $receivableSummary['total_outstanding'] = $receivableOutstanding['online'] + $receivableOutstanding['offline'] + $receivableOutstanding['dealer'];
-    $receivableSummary['unpaid_count'] = $onlineUnpaid + $offlineUnpaid + $dealerUnpaid;
-    $receivableSummary['partial_count'] = $onlinePartial + $offlinePartial + $dealerPartial;
 
     $purchaseItemAgg = api_table_exists($pdo, 'purchase_order_items')
         ? 'LEFT JOIN (
@@ -978,7 +1236,9 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
         : '';
     $purchaseRows = api_table_exists($pdo, 'purchase_orders') ? mec_fetch_rows(
         $pdo,
-        "SELECT COALESCE(po.order_number, CONCAT('PO-', po.id)) AS po_no,
+        "SELECT po.id,
+                DATE(COALESCE(po.order_date, po.created_at)) AS order_date,
+                COALESCE(po.order_number, CONCAT('PO-', po.id)) AS po_no,
                 COALESCE(pv.name, '') AS supplier,
                 COALESCE(po.status, '') AS po_status,
                 $purchaseItemSelect,
@@ -993,13 +1253,38 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
          $purchaseItemAgg
          WHERE DATE(COALESCE(po.order_date, po.created_at)) BETWEEN ? AND ?
            AND LOWER(COALESCE(po.status,'')) NOT IN ('cancel','cancelled','canceled')
-         ORDER BY po.order_date DESC, po.id DESC
-         LIMIT 80",
+         ORDER BY order_date ASC, po.id ASC",
         [$from, $to]
     ) : [];
+    if ($purchaseRows && api_table_exists($pdo, 'purchase_order_items')) {
+        $purchaseIds = array_values(array_map(static fn(array $row): int => (int)$row['id'], $purchaseRows));
+        $placeholders = implode(',', array_fill(0, count($purchaseIds), '?'));
+        $purchaseItemRows = mec_fetch_rows(
+            $pdo,
+            "SELECT purchase_order_id,
+                    COALESCE(NULLIF(TRIM(item_name), ''), 'Item') AS item_name,
+                    COALESCE(SUM(quantity_ordered), 0) AS qty
+             FROM purchase_order_items
+             WHERE purchase_order_id IN ($placeholders)
+             GROUP BY purchase_order_id, COALESCE(NULLIF(TRIM(item_name), ''), 'Item')",
+            $purchaseIds
+        );
+        $qtyByPo = [];
+        foreach ($purchaseItemRows as $item) {
+            $qtyByPo[(int)$item['purchase_order_id']][(string)$item['item_name']] = (float)$item['qty'];
+        }
+        foreach ($purchaseRows as &$purchaseRow) {
+            $purchaseRow['products'] = $qtyByPo[(int)$purchaseRow['id']] ?? [];
+        }
+        unset($purchaseRow);
+    }
     $purchaseClosing = mec_purchase_closing_data($pdo, $from, $to);
 
-    $payableRows = api_table_exists($pdo, 'purchase_orders') ? mec_fetch_rows($pdo, "SELECT COALESCE(pv.name, '') AS supplier, COALESCE(po.order_number, CONCAT('PO-', po.id)) AS invoice, COALESCE(po.total_amount, 0) AS amount, COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0) AS paid, GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) AS balance, DATE_ADD(DATE(COALESCE(po.order_date, po.created_at)), INTERVAL 30 DAY) AS due_date, CASE WHEN DATE_ADD(DATE(COALESCE(po.order_date, po.created_at)), INTERVAL 30 DAY) < CURDATE() AND GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) > 0 THEN 'Overdue' WHEN GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) > 0 THEN 'Open' ELSE 'Paid' END AS status FROM purchase_orders po LEFT JOIN purchase_vendors pv ON pv.id = po.vendor_id WHERE DATE(COALESCE(po.order_date, po.created_at)) BETWEEN ? AND ? HAVING balance > 0 ORDER BY due_date ASC LIMIT 80", [$from, $to]) : [];
+    $payableDateSql = $includePreviousAp
+        ? 'DATE(COALESCE(po.order_date, po.created_at)) <= ?'
+        : 'DATE(COALESCE(po.order_date, po.created_at)) BETWEEN ? AND ?';
+    $payableParams = $includePreviousAp ? [$to] : [$from, $to];
+    $payableRows = api_table_exists($pdo, 'purchase_orders') ? mec_fetch_rows($pdo, "SELECT COALESCE(pv.name, '') AS supplier, COALESCE(po.order_number, CONCAT('PO-', po.id)) AS invoice, COALESCE(po.total_amount, 0) AS amount, COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0) AS paid, GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) AS balance, DATE_ADD(DATE(COALESCE(po.order_date, po.created_at)), INTERVAL 30 DAY) AS due_date, CASE WHEN DATE_ADD(DATE(COALESCE(po.order_date, po.created_at)), INTERVAL 30 DAY) < CURDATE() AND GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) > 0 THEN 'Overdue' WHEN GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) > 0 THEN 'Open' ELSE 'Paid' END AS status FROM purchase_orders po LEFT JOIN purchase_vendors pv ON pv.id = po.vendor_id WHERE $payableDateSql HAVING balance > 0 ORDER BY due_date ASC", $payableParams) : [];
 
     $bankRows = [];
     $bankNames = [];
@@ -1059,6 +1344,7 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
                 'offline' => ['partial' => $offlinePartial, 'unpaid' => $offlineUnpaid],
                 'dealer' => ['partial' => $dealerPartial, 'unpaid' => $dealerUnpaid],
             ],
+            'orderDetails' => [],
             'sourcePerformance' => [
                 ['key' => 'online', 'label' => 'Online', 'orders' => $onlineOrderCount, 'amount' => $onlineSales],
                 ['key' => 'offline', 'label' => 'Offline', 'orders' => $offlineOrderCount, 'amount' => $offlineSales],
@@ -1087,6 +1373,13 @@ function mec_merge_actuals(array $rows, array $steps): array
         if (!is_array($actual)) continue;
         if ($key === 'cash_bank' && isset($actual['cashBank']) && is_array($actual['cashBank'])) $rows['cashBank'] = $actual['cashBank'];
         if ($key === 'inventory' && isset($actual['inventory']) && is_array($actual['inventory'])) $rows['inventory'] = $actual['inventory'];
+        if ($key === 'receivable' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['receivable'], $actual['receivable_summary']) && is_array($actual['receivable']) && is_array($actual['receivable_summary'])) {
+            $rows['receivable'] = $actual['receivable'];
+            $rows['receivable_summary'] = $actual['receivable_summary'];
+        }
+        if ($key === 'payable' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['payable']) && is_array($actual['payable'])) {
+            $rows['payable'] = $actual['payable'];
+        }
     }
     return $rows;
 }
@@ -1261,7 +1554,7 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
     $marketingUsed = mec_sum_assoc($marketingRows, 'used');
     $marketingReturned = mec_sum_assoc($marketingRows, 'returned');
     $marketingNotReturned = mec_sum_assoc($marketingRows, 'not_returned');
-    $criticalIssues = mec_issue_count('cash_bank', $rows) + mec_issue_count('inventory', $rows) + mec_issue_count('adjustments', $rows);
+    $criticalIssues = mec_issue_count('cash_bank', $rows) + mec_issue_count('adjustments', $rows);
     $openIssues = array_reduce(array_keys(MEC_STEPS), static fn(int $sum, string $key): int => $sum + mec_issue_count($key, $rows), 0);
 
     return [
@@ -1393,7 +1686,8 @@ function mec_response(PDO $pdo, string $month): void
 {
     $closing = mec_get_closing($pdo, $month);
     $includePreviousAr = !empty($_GET['include_previous_ar']);
-    $rows = mec_calculated_data($pdo, $month, $includePreviousAr);
+    $includePreviousAp = !empty($_GET['include_previous_ap']);
+    $rows = mec_calculated_data($pdo, $month, $includePreviousAr, $includePreviousAp);
     $savedSteps = mec_fetch_rows($pdo, 'SELECT * FROM month_end_closing_steps WHERE closing_id = ?', [(int)$closing['id']]);
     $rows = mec_merge_actuals($rows, $savedSteps);
     $steps = mec_step_records($pdo, (int)$closing['id'], $rows);
@@ -1434,7 +1728,9 @@ try {
         $closingId = (int)$closing['id'];
         $action = trim((string)($payload['action'] ?? 'save_step'));
         $userId = mec_current_user_id();
-        $rows = mec_calculated_data($pdo, $month);
+        if (!empty($payload['include_previous_ar'])) $_GET['include_previous_ar'] = 1;
+        if (!empty($payload['include_previous_ap'])) $_GET['include_previous_ap'] = 1;
+        $rows = mec_calculated_data($pdo, $month, !empty($_GET['include_previous_ar']), !empty($_GET['include_previous_ap']));
         $savedSteps = mec_fetch_rows($pdo, 'SELECT * FROM month_end_closing_steps WHERE closing_id = ?', [$closingId]);
         $rows = mec_merge_actuals($rows, $savedSteps);
 
@@ -1442,10 +1738,50 @@ try {
             api_error(date('F Y', strtotime($month . '-01')) . ' is closed. Transactions for this accounting period cannot be modified.', 409);
         }
 
+        if ($action === 'close_sales') {
+            if (mec_issue_count('sales', $rows) > 0) {
+                api_error('Finish pending or incomplete orders before closing sales.', 422);
+            }
+            mec_save_step($pdo, $closingId, 'sales', 'LOCKED', trim((string)($payload['note'] ?? '')), [], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_receivable') {
+            mec_save_step($pdo, $closingId, 'receivable', 'LOCKED', trim((string)($payload['note'] ?? '')), [
+                'receivable' => $rows['receivable'] ?? [],
+                'receivable_summary' => $rows['receivable_summary'] ?? [],
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_payable') {
+            mec_save_step($pdo, $closingId, 'payable', 'LOCKED', trim((string)($payload['note'] ?? '')), [
+                'payable' => $rows['payable'] ?? [],
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
         if ($action === 'save_step' || $action === 'mark_review' || $action === 'mark_reviewed') {
             $key = trim((string)($payload['step_key'] ?? ''));
             $note = trim((string)($payload['note'] ?? ''));
             $actuals = is_array($payload['actuals'] ?? null) ? $payload['actuals'] : [];
+            $salesSaved = null;
+            $receivableSaved = null;
+            $payableSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'sales') $salesSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'receivable') $receivableSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'payable') $payableSaved = $savedStep;
+            }
+            if ($key === 'sales' && strtoupper((string)($salesSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Sales Closing is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'receivable' && strtoupper((string)($receivableSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Accounts Receivable is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'payable' && strtoupper((string)($payableSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Accounts Payable is locked. Changes require manager unlock.', 409);
+            }
             if ($key === 'cash_bank' && isset($actuals['cashBank'])) $rows['cashBank'] = $actuals['cashBank'];
             if ($key === 'inventory' && isset($actuals['inventory'])) $rows['inventory'] = $actuals['inventory'];
             $status = $action === 'mark_review' ? 'NEEDS_REVIEW' : ($action === 'mark_reviewed' ? 'REVIEWED' : (string)($payload['status'] ?? 'IN_PROGRESS'));
@@ -1510,6 +1846,18 @@ try {
         }
 
         api_error('Unknown action.', 422);
+    }
+
+    if (($_GET['view'] ?? '') === 'sales_orders') {
+        $from = mec_month_start($month);
+        $to = mec_month_end($month);
+        $onlineActive = "COALESCE(o.is_cancelled, 0) = 0 AND COALESCE(o.is_returned, 0) = 0 AND LOWER(COALESCE(o.status, '')) NOT IN ('cancel', 'cancelled', 'canceled', 'return', 'returned', 'draft')";
+        $offlineActive = "LOWER(COALESCE(status,'')) NOT IN ('cancel','cancelled','canceled','return','returned')";
+        $dealerActive = "LOWER(COALESCE(status,'')) NOT IN ('cancel','cancelled','canceled','return','returned')";
+        api_json([
+            'success' => true,
+            'orders' => mec_sales_order_details($pdo, $from, $to, $onlineActive, $offlineActive, $dealerActive),
+        ]);
     }
 
     mec_response($pdo, $month);
