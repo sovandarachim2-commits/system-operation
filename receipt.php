@@ -21,6 +21,7 @@ $from = $_GET['from'] ?? '';
 $order_id = (int)($_GET['id'] ?? 0);
 $pendingOrder = $_SESSION['pending_new_order'] ?? null;
 $isPendingPreview = $from === 'new' && $order_id <= 0;
+$isEmbedPreview = ($_GET['embed'] ?? '') === '1';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_send']) && $isPendingPreview) {
     if (!$pendingOrder || empty($pendingOrder['items'])) {
@@ -102,15 +103,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_send']) && $i
         ], $pendingOrder['items'] ?? []);
         user_activity_log_module_mutation($user, 'seller', 'create', __FILE__, $det !== '' ? $det : 'order ' . $order_code . ' (id ' . $order_id . ')');
 
-        $tgResult = send_order_to_telegram($pdo, $order_id);
-        if (!empty($tgResult['ok'])) {
-            $_SESSION['order_flash_success'] = 'Order created and sent to Telegram.';
-        } else {
-            $_SESSION['order_flash_warning'] = 'Order saved, but Telegram failed: ' . ($tgResult['error'] ?? 'unknown error')
-                . ' (group ' . ($tgResult['chat_id'] ?? '?')
-                . (isset($tgResult['thread_id']) && $tgResult['thread_id'] !== null ? ', topic ' . $tgResult['thread_id'] : '')
-                . ')';
-        }
+        send_order_to_telegram_async($pdo, $order_id);
+        $_SESSION['order_flash_success'] = 'Order created. Telegram is sending in the background.';
         header('Location: seller/orders.php?created=1');
         exit;
     } catch (Throwable $e) {
@@ -575,10 +569,20 @@ require_once __DIR__ . '/config.php';
             }
         }
     </style>
-    <?php if ($from === 'reprint'): ?>
+    <?php if ($from === 'reprint' || $isEmbedPreview): ?>
     <style>
         form.receipt-actions-form {
             display: none !important;
+        }
+        body {
+            background: #ffffff;
+        }
+        .container-fluid {
+            padding: 0 !important;
+        }
+        .receipt-card {
+            margin-top: 0;
+            margin-bottom: 0;
         }
     </style>
     <?php endif; ?>

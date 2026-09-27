@@ -205,7 +205,7 @@ try {
     user_activity_log_module_mutation($user, 'seller', 'create', __FILE__, $details !== '' ? $details : 'order ' . $orderCode . ' (id ' . $orderId . ')');
 
     try {
-        send_order_to_telegram($pdo, $orderId);
+        send_order_to_telegram_async($pdo, $orderId);
     } catch (Throwable $telegramError) {
         error_log('online_sale_create Telegram warning: ' . $telegramError->getMessage());
     }

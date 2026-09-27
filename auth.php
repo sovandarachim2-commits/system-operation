@@ -47,7 +47,10 @@ function auth_apply_report_cors(): void
 {
     $origin = (string)($_SERVER['HTTP_ORIGIN'] ?? '');
     $allowed = $GLOBALS['API_ALLOWED_ORIGINS'] ?? [];
-    if ($origin === '' || !is_array($allowed) || !in_array($origin, $allowed, true)) {
+    if (!is_array($allowed)) {
+        $allowed = [];
+    }
+    if ($origin === '' || !in_array($origin, $allowed, true)) {
         return;
     }
     header('Access-Control-Allow-Origin: ' . $origin);

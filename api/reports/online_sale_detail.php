@@ -48,9 +48,16 @@ try {
             o.is_cancelled,
             o.is_returned,
             o.seller_id,
-            COALESCE(NULLIF(u.name, \'\'), u.username, \'Shadow Shop\') AS seller
+            COALESCE(NULLIF(u.name, \'\'), u.username, \'Shadow Shop\') AS seller,
+            p.name AS page_name,
+            dt.name AS delivery_type_name,
+            dc.label AS delivery_cost_label,
+            dc.amount AS delivery_cost_amount
         FROM orders o
         LEFT JOIN users u ON u.id = o.seller_id
+        LEFT JOIN pages p ON p.id = o.page_id
+        LEFT JOIN delivery_types dt ON dt.id = o.delivery_type_id
+        LEFT JOIN delivery_costs dc ON dc.id = o.delivery_cost_id
         WHERE o.id = ?
     ';
     $params = [$orderId];
@@ -83,6 +90,10 @@ try {
     ');
     $itemsStmt->execute([$orderId]);
     $order['items'] = $itemsStmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $rateStmt = $pdo->prepare("SELECT setting_value FROM settings WHERE setting_key = 'usd_to_khr_rate' LIMIT 1");
+    $rateStmt->execute();
+    $order['exchange_rate'] = (float)($rateStmt->fetchColumn() ?: 4100);
 
     api_json([
         'success' => true,
