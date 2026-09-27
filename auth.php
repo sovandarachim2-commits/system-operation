@@ -77,6 +77,9 @@ function auth_restore_user_from_report_token(): void
     if ($token === '') {
         $token = trim((string)($_SERVER['HTTP_X_REPORT_TOKEN'] ?? ''));
     }
+    if ($token === '') {
+        $token = trim((string)($_GET['report_token'] ?? ''));
+    }
     if ($token === '' || strpos($token, '.') === false) {
         return;
     }

@@ -22,6 +22,23 @@ $order_id = (int)($_GET['id'] ?? 0);
 $pendingOrder = $_SESSION['pending_new_order'] ?? null;
 $isPendingPreview = $from === 'new' && $order_id <= 0;
 $isEmbedPreview = ($_GET['embed'] ?? '') === '1';
+if ($isEmbedPreview) {
+    header_remove('X-Frame-Options');
+    $frameOrigins = $GLOBALS['API_ALLOWED_ORIGINS'] ?? [];
+    if (!is_array($frameOrigins)) {
+        $frameOrigins = [];
+    }
+    $ancestors = [];
+    foreach ($frameOrigins as $origin) {
+        $clean = preg_replace('/[^a-zA-Z0-9:\\/.\\-_]/', '', (string)$origin);
+        if ($clean !== '') {
+            $ancestors[] = $clean;
+        }
+    }
+    if ($ancestors) {
+        header('Content-Security-Policy: frame-ancestors \'self\' ' . implode(' ', array_values(array_unique($ancestors))));
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['confirm_send']) && $isPendingPreview) {
     if (!$pendingOrder || empty($pendingOrder['items'])) {
@@ -250,6 +267,9 @@ require_once __DIR__ . '/config.php';
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <?php if ($isEmbedPreview): ?>
+    <meta name="referrer" content="no-referrer">
+    <?php endif; ?>
     <title>Receipt <?= htmlspecialchars($order['order_code']) ?></title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;600;700;900&family=Battambang:wght@400;700&display=swap" rel="stylesheet">
@@ -574,15 +594,17 @@ require_once __DIR__ . '/config.php';
         form.receipt-actions-form {
             display: none !important;
         }
-        body {
+        html, body {
             background: #ffffff;
+            margin: 0;
         }
-        .container-fluid {
+        .container-fluid,
+        .container-fluid.py-3 {
             padding: 0 !important;
         }
         .receipt-card {
-            margin-top: 0;
-            margin-bottom: 0;
+            max-width: 100%;
+            margin: 0 auto;
         }
     </style>
     <?php endif; ?>

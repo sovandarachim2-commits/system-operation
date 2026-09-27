@@ -280,38 +280,52 @@ function send_telegram_message(string $text): void
 
 function telegram_http_post_form(string $url, array $data): ?string
 {
-    if (function_exists('curl_init')) {
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => http_build_query($data),
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_CONNECTTIMEOUT => 5,
-            CURLOPT_TIMEOUT        => 12,
-        ]);
-        $response = curl_exec($ch);
-        $curlError = curl_error($ch);
-        curl_close($ch);
-        if ($response !== false) {
-            return $response;
+    $attempts = 0;
+    $lastError = '';
+
+    while ($attempts < 2) {
+        $attempts++;
+        if (function_exists('curl_init')) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => http_build_query($data),
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CONNECTTIMEOUT => 8,
+                CURLOPT_TIMEOUT        => 20,
+            ]);
+            $response = curl_exec($ch);
+            $curlError = curl_error($ch);
+            curl_close($ch);
+            if ($response !== false) {
+                return $response;
+            }
+            $lastError = $curlError;
         }
-        if ($curlError !== '') {
-            error_log('Telegram curl error: ' . $curlError);
+
+        $options = [
+            'http' => [
+                'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
+                'method'  => 'POST',
+                'content' => http_build_query($data),
+                'timeout' => 20,
+                'ignore_errors' => true,
+            ],
+        ];
+        $raw = @file_get_contents($url, false, stream_context_create($options));
+        if ($raw !== false) {
+            return $raw;
+        }
+
+        if ($attempts < 2) {
+            usleep(250000);
         }
     }
 
-    $options = [
-        'http' => [
-            'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
-            'method'  => 'POST',
-            'content' => http_build_query($data),
-            'timeout' => 12,
-            'ignore_errors' => true,
-        ],
-    ];
-
-    $raw = @file_get_contents($url, false, stream_context_create($options));
-    return $raw === false ? null : $raw;
+    if ($lastError !== '') {
+        error_log('Telegram curl error: ' . $lastError);
+    }
+    return null;
 }
 
 function telegram_send_message_request(string $botToken, string $chatId, string $text, ?int $threadId = null, ?int $replyToId = null, array $options = []): array
@@ -343,6 +357,22 @@ function telegram_send_message_request(string $botToken, string $chatId, string 
     $decoded = json_decode($raw, true);
     if (!is_array($decoded)) {
         return ['ok' => false, 'decoded' => null];
+    }
+
+    $description = strtolower((string)($decoded['description'] ?? ''));
+    $parseFailed = empty($decoded['ok'])
+        && $description !== ''
+        && (stripos($description, 'parse entities') !== false || stripos($description, "can't parse") !== false || stripos($description, 'cannot parse') !== false);
+    if ($parseFailed && ($data['parse_mode'] ?? '') !== '') {
+        unset($data['parse_mode']);
+        $raw = telegram_http_post_form($url, $data);
+        if ($raw === null) {
+            return ['ok' => false, 'decoded' => $decoded];
+        }
+        $retry = json_decode($raw, true);
+        if (is_array($retry)) {
+            return ['ok' => !empty($retry['ok']), 'decoded' => $retry];
+        }
     }
 
     return ['ok' => !empty($decoded['ok']), 'decoded' => $decoded];
@@ -408,9 +438,17 @@ function telegram_send_order_message(string $botToken, string $text, ?array $tar
 
     if (!$result['ok'] && $threadInt !== null && is_array($decoded)
         && isset($decoded['description'])
-        && stripos((string)$decoded['description'], 'message thread not found') !== false
+        && stripos((string)$decoded['description'], 'thread') !== false
     ) {
         $result = telegram_send_message_request($botToken, $chatId, $text, null, $replyToId);
+        $decoded = $result['decoded'];
+    }
+
+    if (!$result['ok'] && $replyToId !== null && is_array($decoded)
+        && isset($decoded['description'])
+        && stripos((string)$decoded['description'], 'reply') !== false
+    ) {
+        $result = telegram_send_message_request($botToken, $chatId, $text, $threadInt, null);
     }
 
     return $result;
@@ -672,36 +710,65 @@ function send_order_to_telegram(PDO $pdo, int $order_id, array $before = []): ar
     return ['ok' => true, 'error' => '', 'chat_id' => $target['chat_id'], 'thread_id' => $threadId];
 }
 
+function telegram_error_is_retryable(string $error): bool
+{
+    $text = strtolower($error);
+    if ($text === '') {
+        return true;
+    }
+    foreach (['not configured', 'no telegram target', 'set seller chat', 'order not found', 'invalid order'] as $needle) {
+        if (stripos($text, $needle) !== false) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /**
- * Queue send_order_to_telegram() to run at end of the HTTP request.
- * Uses a fresh DB connection so it still works after redirect.
- * (Windows/XAMPP background popen with PHP_BINARY is unreliable and was skipping sends.)
+ * Send the order Telegram now, before the HTTP response ends.
+ * Tries 3 times: immediately, then after 1s, then after 2s.
+ *
+ * @return array{ok: bool, error: string, chat_id: string, thread_id: int|null}
  */
-function send_order_to_telegram_async(PDO $pdo, int $order_id): void
+function send_order_to_telegram_async(PDO $pdo, int $order_id): array
 {
     $orderId = (int)$order_id;
     if ($orderId <= 0) {
-        return;
+        return ['ok' => false, 'error' => 'Invalid order id', 'chat_id' => '', 'thread_id' => null];
     }
 
-    $deliver = static function () use ($orderId): void {
+    ignore_user_abort(true);
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(90);
+    }
+
+    $waits = [0, 1, 2];
+    $result = ['ok' => false, 'error' => 'Telegram send was not attempted', 'chat_id' => '', 'thread_id' => null];
+
+    foreach ($waits as $index => $waitSeconds) {
+        if ($waitSeconds > 0) {
+            sleep($waitSeconds);
+        }
         try {
-            $pdo = get_db_connection();
             $result = send_order_to_telegram($pdo, $orderId);
-            if (empty($result['ok'])) {
-                error_log('Telegram async send failed (order ' . $orderId . '): ' . ($result['error'] ?? 'unknown'));
+            if (!empty($result['ok'])) {
+                return $result;
+            }
+            $error = (string)($result['error'] ?? 'unknown');
+            error_log('Telegram send attempt ' . ($index + 1) . '/3 failed (order ' . $orderId . '): ' . $error);
+            if (!telegram_error_is_retryable($error)) {
+                return $result;
             }
         } catch (Throwable $e) {
-            error_log('Telegram order send exception (order ' . $orderId . '): ' . $e->getMessage());
+            $result = ['ok' => false, 'error' => $e->getMessage(), 'chat_id' => '', 'thread_id' => null];
+            error_log('Telegram send attempt ' . ($index + 1) . '/3 exception (order ' . $orderId . '): ' . $e->getMessage());
+            if (!telegram_error_is_retryable($e->getMessage())) {
+                return $result;
+            }
         }
-    };
+    }
 
-    register_shutdown_function(static function () use ($deliver): void {
-        if (function_exists('fastcgi_finish_request')) {
-            @fastcgi_finish_request();
-        }
-        $deliver();
-    });
+    return $result;
 }
 
 function send_order_cancel_telegram(PDO $pdo, int $order_id, string $reason = ''): void

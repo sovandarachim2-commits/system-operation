@@ -87,6 +87,9 @@ function api_restore_user_from_report_token(): void
     if ($token === '') {
         $token = (string)($_SERVER['HTTP_X_REPORT_TOKEN'] ?? '');
     }
+    if ($token === '') {
+        $token = trim((string)($_GET['report_token'] ?? ''));
+    }
     $userId = api_report_token_user_id($token);
     if ($userId > 0) {
         $_SESSION['user_id'] = $userId;

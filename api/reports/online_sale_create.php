@@ -204,19 +204,27 @@ try {
     ], $items);
     user_activity_log_module_mutation($user, 'seller', 'create', __FILE__, $details !== '' ? $details : 'order ' . $orderCode . ' (id ' . $orderId . ')');
 
+    $telegram = ['ok' => false, 'error' => ''];
     try {
-        send_order_to_telegram_async($pdo, $orderId);
+        $telegram = send_order_to_telegram_async($pdo, $orderId);
     } catch (Throwable $telegramError) {
+        $telegram = ['ok' => false, 'error' => $telegramError->getMessage()];
         error_log('online_sale_create Telegram warning: ' . $telegramError->getMessage());
     }
 
     api_json([
         'success' => true,
-        'message' => 'Sale saved.',
+        'message' => empty($telegram['ok'])
+            ? 'Order saved, but Telegram notification was not sent.'
+            : 'Sale saved.',
         'order' => [
             'id' => $orderId,
             'order_code' => $orderCode,
             'total_amount' => $grandTotal,
+        ],
+        'telegram' => [
+            'ok' => !empty($telegram['ok']),
+            'error' => (string)($telegram['error'] ?? ''),
         ],
     ]);
 } catch (Throwable $e) {
