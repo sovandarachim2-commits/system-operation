@@ -461,6 +461,7 @@ function ft_handle_receipt_upload(string $topupDate): ?string
     return $stored !== '' ? $stored : null;
 }
 
+if (!defined('FT_LIBRARY_ONLY')) {
 try {
     $user = current_user(true) ?: [];
     if (!$user || !ft_can($user, 'view')) {
@@ -782,4 +783,5 @@ try {
 } catch (Throwable $e) {
     error_log('finance_topups API error: ' . $e->getMessage());
     api_error($e->getMessage() ?: 'Unable to load top-up report.', 500);
+}
 }

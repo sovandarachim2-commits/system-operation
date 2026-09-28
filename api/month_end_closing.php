@@ -744,6 +744,16 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
     $rows = [];
 
     if (api_table_exists($pdo, 'dealer_orders')) {
+        $dealerSeller = "''";
+        $dealerSellerJoin = '';
+        if (mec_has($pdo, 'dealer_orders', 'sales_person')) {
+            $dealerSeller = "NULLIF(TRIM(o.sales_person), '')";
+        }
+        if (api_table_exists($pdo, 'users') && mec_has($pdo, 'dealer_orders', 'created_by')) {
+            $dealerSellerJoin = 'LEFT JOIN users su ON su.id = o.created_by';
+            $dealerSellerName = "COALESCE(NULLIF(TRIM(su.name), ''), NULLIF(TRIM(su.username), ''), '')";
+            $dealerSeller = $dealerSeller === "''" ? $dealerSellerName : "COALESCE($dealerSeller, $dealerSellerName)";
+        }
         $dealerRows = mec_fetch_rows(
             $pdo,
             "SELECT
@@ -752,12 +762,14 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 o.order_code AS invoice,
                 DATE(o.order_date) AS invoice_date,
                 DATE(o.created_at) AS recorded_date,
+                $dealerSeller AS party,
                 COALESCE(o.grand_total, 0) AS original_amount,
                 COALESCE(o.paid_amount, 0) AS paid,
                 GREATEST(COALESCE(o.balance_amount, COALESCE(o.grand_total, 0) - COALESCE(o.paid_amount, 0)), 0) AS outstanding,
                 COALESCE(o.payment_status, '') AS payment_status_raw
             FROM dealer_orders o
             LEFT JOIN dealers d ON d.id = o.dealer_id
+            $dealerSellerJoin
             WHERE " . ($includePrevious ? "DATE(o.order_date) <= ?" : "DATE(o.order_date) BETWEEN ? AND ?") . "
               AND " . mec_dealer_receivable_filter_sql($pdo) . "
             HAVING outstanding > 0.004
@@ -773,6 +785,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
                 'recorded_date' => (string)$row['recorded_date'],
+                'party' => (string)($row['party'] ?? ''),
                 'original_amount' => (float)$row['original_amount'],
                 'paid' => $paid,
                 'outstanding' => $outstanding,
@@ -784,6 +797,10 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
 
     if (api_table_exists($pdo, 'offline_sale_orders')) {
         $offlineDateExpr = mec_date_expr($pdo, 'offline_sale_orders', ['sale_date', 'order_date', 'created_at']) ?: 'created_at';
+        $offlineParty = "''";
+        if (mec_has($pdo, 'offline_sale_orders', 'team_id') && api_table_exists($pdo, 'offline_teams')) {
+            $offlineParty = "COALESCE((SELECT NULLIF(TRIM(ot.name), '') FROM offline_teams ot WHERE ot.id = o.team_id LIMIT 1), '')";
+        }
         $offlineRows = mec_fetch_rows(
             $pdo,
             "SELECT
@@ -792,6 +809,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 COALESCE(o.order_code, CONCAT('OFF-', o.id)) AS invoice,
                 DATE($offlineDateExpr) AS invoice_date,
                 DATE(o.created_at) AS recorded_date,
+                $offlineParty AS party,
                 COALESCE(o.total_amount, 0) AS original_amount,
                 COALESCE(o.received_amount, 0) AS paid,
                 GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.received_amount, 0), 0) AS outstanding,
@@ -812,6 +830,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
                 'recorded_date' => (string)$row['recorded_date'],
+                'party' => (string)($row['party'] ?? ''),
                 'original_amount' => (float)$row['original_amount'],
                 'paid' => $paid,
                 'outstanding' => $outstanding,
@@ -826,14 +845,17 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
         $onlineJoin = mec_online_print_join_sql($pdo);
         $onlineReceivableFilter = mec_online_receivable_filter_sql($pdo);
         $onlineAmountExpr = mec_online_amount_expr($pdo);
+        $onlineCode = "COALESCE(NULLIF(o.order_code, ''), CONCAT('ON-', o.id))";
+        $onlineParty = mec_collection_delivery_expr($pdo, $onlineCode);
         $onlineRows = mec_fetch_rows(
             $pdo,
             "SELECT
                 'Online' AS source,
                 COALESCE(NULLIF(o.customer_name, ''), NULLIF(o.phone, ''), 'Online Customer') AS customer,
-                COALESCE(o.order_code, CONCAT('ON-', o.id)) AS invoice,
+                $onlineCode AS invoice,
                 DATE($onlineDateExpr) AS invoice_date,
                 DATE(o.created_at) AS recorded_date,
+                $onlineParty AS party,
                 $onlineAmountExpr AS original_amount,
                 CASE
                     WHEN COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid' THEN $onlineAmountExpr
@@ -861,6 +883,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
                 'recorded_date' => (string)$row['recorded_date'],
+                'party' => (string)($row['party'] ?? ''),
                 'original_amount' => (float)$row['original_amount'],
                 'paid' => $paid,
                 'outstanding' => $outstanding,
@@ -882,6 +905,180 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
     return $rows;
 }
 
+function mec_prior_ar_collections(PDO $pdo, string $from, string $to): array
+{
+    $rows = [];
+
+    if (api_table_exists($pdo, 'dealer_order_payments') && api_table_exists($pdo, 'dealer_orders')) {
+        $dealerJoin = api_table_exists($pdo, 'dealers') ? 'LEFT JOIN dealers d ON d.id = o.dealer_id' : '';
+        $customer = api_table_exists($pdo, 'dealers')
+            ? "COALESCE(NULLIF(d.name, ''), NULLIF(o.dealer_name, ''), CONCAT('Dealer #', o.dealer_id))"
+            : "COALESCE(NULLIF(o.dealer_name, ''), CONCAT('Dealer #', o.dealer_id))";
+        $phoneParts = [];
+        if (mec_has($pdo, 'dealer_orders', 'phone')) $phoneParts[] = "NULLIF(TRIM(o.phone), '')";
+        if (api_table_exists($pdo, 'dealers') && mec_has($pdo, 'dealers', 'phone')) $phoneParts[] = "NULLIF(TRIM(d.phone), '')";
+        $phone = $phoneParts ? 'COALESCE(' . implode(', ', $phoneParts) . ", '')" : "''";
+        $code = "COALESCE(NULLIF(o.order_code, ''), CONCAT('D-', o.id))";
+        $sellerJoin = '';
+        $seller = "''";
+        if (mec_has($pdo, 'dealer_orders', 'sales_person')) {
+            $seller = "NULLIF(TRIM(o.sales_person), '')";
+        }
+        if (api_table_exists($pdo, 'users') && mec_has($pdo, 'dealer_orders', 'created_by')) {
+            $sellerJoin = 'LEFT JOIN users su ON su.id = o.created_by';
+            $sellerName = "COALESCE(NULLIF(TRIM(su.name), ''), NULLIF(TRIM(su.username), ''), '')";
+            $seller = $seller === "''" ? $sellerName : "COALESCE($seller, $sellerName)";
+        }
+        $totalCol = mec_pick($pdo, 'dealer_orders', ['grand_total', 'total_amount', 'amount']);
+        $total = $totalCol ? 'COALESCE(o.' . api_quote_identifier($totalCol) . ', 0)' : '0';
+        $collectorJoin = '';
+        $collector = "''";
+        if (api_table_exists($pdo, 'users')) {
+            $collectorJoin = 'LEFT JOIN users cu ON cu.id = p.paid_by';
+            $collector = "COALESCE(NULLIF(TRIM(cu.name), ''), NULLIF(TRIM(cu.username), ''), '')";
+        }
+        $rows = array_merge($rows, mec_fetch_rows(
+            $pdo,
+            "SELECT
+                DATE(p.paid_date) AS payment_date,
+                DATE(o.order_date) AS order_date,
+                $code AS order_no,
+                $customer AS customer,
+                $phone AS phone,
+                $seller AS delivery_by,
+                $total AS total_amount,
+                COALESCE(p.amount, 0) AS collected,
+                $collector AS collected_by,
+                'Dealer' AS source
+             FROM dealer_order_payments p
+             JOIN dealer_orders o ON o.id = p.order_id
+             $dealerJoin
+             $sellerJoin
+             $collectorJoin
+             WHERE DATE(p.paid_date) BETWEEN ? AND ?
+               AND DATE(o.order_date) < ?
+               AND COALESCE(p.amount, 0) > 0.004",
+            [$from, $to, $from]
+        ));
+    }
+
+    if (api_table_exists($pdo, 'offline_sale_payments') && api_table_exists($pdo, 'offline_sale_orders')) {
+        $offlineParts = [];
+        foreach (['sale_date', 'order_date', 'created_at'] as $column) {
+            if (mec_has($pdo, 'offline_sale_orders', $column)) {
+                $offlineParts[] = 'o.' . api_quote_identifier($column);
+            }
+        }
+        $offlineDate = $offlineParts
+            ? (count($offlineParts) === 1 ? $offlineParts[0] : 'COALESCE(' . implode(', ', $offlineParts) . ')')
+            : 'o.created_at';
+        $offlineCode = mec_has($pdo, 'offline_sale_orders', 'order_code')
+            ? "COALESCE(NULLIF(o.order_code, ''), CONCAT('OFF-', o.id))"
+            : "CONCAT('OFF-', o.id)";
+        $offlinePhone = mec_has($pdo, 'offline_sale_orders', 'phone') ? "COALESCE(o.phone, '')" : "''";
+        $offlineTotalCol = mec_pick($pdo, 'offline_sale_orders', ['total_amount', 'grand_total', 'amount']);
+        $offlineTotal = $offlineTotalCol ? 'COALESCE(o.' . api_quote_identifier($offlineTotalCol) . ', 0)' : '0';
+        $offlineTeamJoin = '';
+        $offlineTeam = "''";
+        if (mec_has($pdo, 'offline_sale_orders', 'team_id') && api_table_exists($pdo, 'offline_teams')) {
+            $offlineTeamJoin = 'LEFT JOIN offline_teams ot ON ot.id = o.team_id';
+            $offlineTeam = "COALESCE(NULLIF(TRIM(ot.name), ''), '')";
+        }
+        $offlineCollectorJoin = '';
+        $offlineCollector = "''";
+        if (api_table_exists($pdo, 'users')) {
+            $offlineCollectorJoin = 'LEFT JOIN users cu ON cu.id = p.created_by';
+            $offlineCollector = "COALESCE(NULLIF(TRIM(cu.name), ''), NULLIF(TRIM(cu.username), ''), '')";
+        }
+        $rows = array_merge($rows, mec_fetch_rows(
+            $pdo,
+            "SELECT
+                DATE(p.payment_date) AS payment_date,
+                DATE($offlineDate) AS order_date,
+                $offlineCode AS order_no,
+                COALESCE(NULLIF(o.customer_name, ''), 'Walk-in Customer') AS customer,
+                $offlinePhone AS phone,
+                $offlineTeam AS delivery_by,
+                $offlineTotal AS total_amount,
+                COALESCE(p.amount, 0) AS collected,
+                $offlineCollector AS collected_by,
+                'Offline' AS source
+             FROM offline_sale_payments p
+             JOIN offline_sale_orders o ON o.id = p.order_id
+             $offlineTeamJoin
+             $offlineCollectorJoin
+             WHERE DATE(p.payment_date) BETWEEN ? AND ?
+               AND DATE($offlineDate) < ?
+               AND COALESCE(p.amount, 0) > 0.004",
+            [$from, $to, $from]
+        ));
+    }
+
+    if (api_table_exists($pdo, 'orders') && mec_has($pdo, 'orders', 'payment_date')) {
+        $printJoin = mec_online_print_join_sql($pdo);
+        $printDate = mec_online_print_date_expr($pdo);
+        $onlineAmount = mec_online_amount_expr($pdo);
+        $onlineCode = mec_has($pdo, 'orders', 'order_code')
+            ? "COALESCE(NULLIF(o.order_code, ''), CONCAT('ON-', o.id))"
+            : "CONCAT('ON-', o.id)";
+        $onlineCustomer = mec_has($pdo, 'orders', 'customer_name')
+            ? "COALESCE(NULLIF(o.customer_name, ''), NULLIF(o.phone, ''), 'Online Customer')"
+            : "'Online Customer'";
+        $onlinePhone = mec_has($pdo, 'orders', 'phone') ? "COALESCE(o.phone, '')" : "''";
+        $onlineDelivery = mec_collection_delivery_expr($pdo, $onlineCode);
+        $onlineCollectorJoin = '';
+        $onlineCollector = "''";
+        if (api_table_exists($pdo, 'users') && mec_has($pdo, 'orders', 'seller_id')) {
+            $onlineCollectorJoin = 'LEFT JOIN users cu ON cu.id = o.seller_id';
+            $onlineCollector = "COALESCE(NULLIF(TRIM(cu.name), ''), NULLIF(TRIM(cu.username), ''), '')";
+        }
+        $rows = array_merge($rows, mec_fetch_rows(
+            $pdo,
+            "SELECT
+                DATE(o.payment_date) AS payment_date,
+                DATE($printDate) AS order_date,
+                $onlineCode AS order_no,
+                $onlineCustomer AS customer,
+                $onlinePhone AS phone,
+                $onlineDelivery AS delivery_by,
+                $onlineAmount AS total_amount,
+                $onlineAmount AS collected,
+                $onlineCollector AS collected_by,
+                'Online' AS source
+             FROM orders o
+             $printJoin
+             $onlineCollectorJoin
+             WHERE DATE(o.payment_date) BETWEEN ? AND ?
+               AND DATE($printDate) < ?
+               AND $onlineAmount > 0.004
+               AND (COALESCE(o.is_paid, 0) = 1 OR LOWER(COALESCE(o.status, '')) = 'paid')
+               AND " . mec_online_active_sql(),
+            [$from, $to, $from]
+        ));
+    }
+
+    $clean = [];
+    foreach ($rows as $row) {
+        $clean[] = [
+            'payment_date' => (string)($row['payment_date'] ?? ''),
+            'order_date' => (string)($row['order_date'] ?? ''),
+            'order_no' => (string)($row['order_no'] ?? ''),
+            'customer' => (string)($row['customer'] ?? ''),
+            'phone' => (string)($row['phone'] ?? ''),
+            'delivery_by' => (string)($row['delivery_by'] ?? ''),
+            'total_amount' => (float)($row['total_amount'] ?? 0),
+            'collected' => (float)($row['collected'] ?? 0),
+            'collected_by' => (string)($row['collected_by'] ?? ''),
+            'source' => (string)($row['source'] ?? ''),
+        ];
+    }
+    usort($clean, static function (array $left, array $right): int {
+        return strcmp((string)$left['payment_date'], (string)$right['payment_date'])
+            ?: strcmp((string)$left['order_no'], (string)$right['order_no']);
+    });
+    return $clean;
+}
+
 function mec_sales_detail_row(string $channel, array $row): array
 {
     return [
@@ -891,6 +1088,7 @@ function mec_sales_detail_row(string $channel, array $row): array
         'customer' => (string)($row['customer'] ?? ''),
         'phone' => (string)($row['phone'] ?? ''),
         'seller' => (string)($row['seller'] ?? ''),
+        'team' => (string)($row['team'] ?? ''),
         'product' => (string)($row['product'] ?? ''),
         'delivery' => (string)($row['delivery'] ?? ''),
         'delivery_by' => (string)($row['delivery_by'] ?? ''),
@@ -899,6 +1097,20 @@ function mec_sales_detail_row(string $channel, array $row): array
         'items' => (float)($row['items'] ?? 0),
         'amount' => (float)($row['amount'] ?? 0),
     ];
+}
+
+function mec_collection_delivery_expr(PDO $pdo, string $codeExpr): string
+{
+    if (!api_table_exists($pdo, 'out_items') || !mec_has($pdo, 'out_items', 'inv') || !mec_has($pdo, 'out_items', 'delivery_by')) {
+        return "''";
+    }
+    return "COALESCE((
+        SELECT MAX(oi2.delivery_by)
+        FROM out_items oi2
+        WHERE oi2.inv COLLATE utf8mb4_unicode_ci = ($codeExpr) COLLATE utf8mb4_unicode_ci
+          AND oi2.delivery_by IS NOT NULL
+          AND TRIM(oi2.delivery_by) <> ''
+    ), '')";
 }
 
 function mec_delivery_by_expr(PDO $pdo, string $codeExpr): string
@@ -1029,16 +1241,15 @@ function mec_sales_order_details(PDO $pdo, string $from, string $to, string $onl
             $customer = mec_has($pdo, 'offline_sale_orders', 'customer_name') ? "COALESCE(o.customer_name, '')" : "''";
             $phone = mec_has($pdo, 'offline_sale_orders', 'phone') ? "COALESCE(o.phone, '')" : "''";
             $join = '';
+            $team = "''";
             $seller = "''";
             if (api_table_exists($pdo, 'offline_teams') && mec_has($pdo, 'offline_sale_orders', 'team_id')) {
                 $join .= ' LEFT JOIN offline_teams t ON t.id = o.team_id';
-                $seller = "COALESCE(NULLIF(TRIM(t.name), ''), '')";
+                $team = "COALESCE(NULLIF(TRIM(t.name), ''), '')";
             }
             if (api_table_exists($pdo, 'users') && mec_has($pdo, 'offline_sale_orders', 'seller_id')) {
                 $join .= ' LEFT JOIN users ou ON ou.id = o.seller_id';
-                $seller = $seller === "''"
-                    ? "COALESCE(NULLIF(TRIM(ou.name), ''), ou.username, '')"
-                    : "COALESCE(NULLIF(TRIM(t.name), ''), NULLIF(TRIM(ou.name), ''), ou.username, '')";
+                $seller = "COALESCE(NULLIF(TRIM(ou.name), ''), ou.username, '')";
             }
             $product = "''";
             $items = '0';
@@ -1066,7 +1277,7 @@ function mec_sales_order_details(PDO $pdo, string $from, string $to, string $onl
             $offlineDetailActive = str_replace('COALESCE(status,', 'COALESCE(o.status,', $offlineActive);
             $offlineRows = mec_fetch_rows(
                 $pdo,
-                "SELECT DATE($dateExpr) AS printed_date, $code AS order_code, $customer AS customer, $phone AS phone, $seller AS seller,
+                "SELECT DATE($dateExpr) AS printed_date, $code AS order_code, $customer AS customer, $phone AS phone, $team AS team, $seller AS seller,
                         COALESCE($product, '') AS product, 'Offline' AS delivery, $deliveryBy AS delivery_by,
                         $payment AS payment, COALESCE(o.status, '') AS status, COALESCE($items, 0) AS items,
                         COALESCE(o." . api_quote_identifier($amountCol) . ", 0) AS amount
@@ -1133,6 +1344,71 @@ function mec_sales_order_details(PDO $pdo, string $from, string $to, string $onl
         }
     }
 
+    return $rows;
+}
+
+function mec_cash_bank_rows(PDO $pdo, string $from, string $to): array
+{
+    if (!function_exists('ft_cashflow_balance_as_of')) {
+        if (!defined('FT_LIBRARY_ONLY')) define('FT_LIBRARY_ONLY', true);
+        require_once __DIR__ . '/reports/finance_topups.php';
+    }
+
+    $openingAsOf = function_exists('ft_day_before') ? ft_day_before($from) : date('Y-m-d', strtotime($from . ' -1 day'));
+    $names = function_exists('ft_bank_names') ? ft_bank_names($pdo) : [];
+    $statements = [];
+    if (api_table_exists($pdo, 'cashflow_bank_balances')) {
+        foreach (mec_fetch_rows($pdo, "SELECT bank_name AS account, amount, COALESCE(note, '') AS note FROM cashflow_bank_balances WHERE balance_date = ? AND balance_type = 'ending'", [$to]) as $row) {
+            $account = trim((string)($row['account'] ?? ''));
+            if ($account === '') continue;
+            $statements[$account] = $row;
+            if (!in_array($account, $names, true)) $names[] = $account;
+        }
+    }
+
+    $rows = [];
+    foreach ($names as $name) {
+        $name = trim((string)$name);
+        if ($name === '' || strcasecmp($name, 'Unpaid') === 0) continue;
+        $open = ft_cashflow_balance_as_of($pdo, $openingAsOf, $name);
+        $close = ft_cashflow_balance_as_of($pdo, $to, $name);
+        $topupIn = (float)$close['finance_topup_in'] - (float)$open['finance_topup_in'];
+        $expenseOut = ((float)$close['finance_spending_out'] + (float)$close['cashflow_spending_out'])
+            - ((float)$open['finance_spending_out'] + (float)$open['cashflow_spending_out']);
+        $periodBalance = (float)$close['balance'];
+        $openingBalance = (float)$open['balance'];
+        $statement = $statements[$name] ?? null;
+        $hasActivity = abs($openingBalance) >= 0.004
+            || abs($periodBalance) >= 0.004
+            || abs($topupIn) >= 0.004
+            || abs($expenseOut) >= 0.004
+            || $statement !== null;
+        if (!$hasActivity) continue;
+        $rows[] = [
+            'account' => $name,
+            'opening_balance' => $openingBalance,
+            'topup_in' => $topupIn,
+            'expense_out' => $expenseOut,
+            'money_in' => $topupIn,
+            'money_out' => $expenseOut,
+            'transfer_in' => (float)$close['transfer_in'] - (float)$open['transfer_in'],
+            'transfer_out' => (float)$close['transfer_out'] - (float)$open['transfer_out'],
+            'system' => $periodBalance,
+            'actual' => '',
+            'reason' => '',
+            'statementDate' => $to,
+            'attachment' => '',
+            'statement_note' => '',
+        ];
+    }
+
+    usort($rows, static function (array $left, array $right): int {
+        $rank = static fn(string $name): int => strcasecmp($name, 'Cash') === 0 ? 0 : 1;
+        $leftRank = $rank((string)$left['account']);
+        $rightRank = $rank((string)$right['account']);
+        if ($leftRank !== $rightRank) return $leftRank <=> $rightRank;
+        return strcasecmp((string)$left['account'], (string)$right['account']);
+    });
     return $rows;
 }
 
@@ -1263,7 +1539,8 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
             $pdo,
             "SELECT purchase_order_id,
                     COALESCE(NULLIF(TRIM(item_name), ''), 'Item') AS item_name,
-                    COALESCE(SUM(quantity_ordered), 0) AS qty
+                    COALESCE(SUM(quantity_ordered), 0) AS qty,
+                    COALESCE(SUM(CASE WHEN line_total > 0 THEN line_total ELSE quantity_ordered * unit_price END), 0) AS cost
              FROM purchase_order_items
              WHERE purchase_order_id IN ($placeholders)
              GROUP BY purchase_order_id, COALESCE(NULLIF(TRIM(item_name), ''), 'Item')",
@@ -1271,7 +1548,10 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
         );
         $qtyByPo = [];
         foreach ($purchaseItemRows as $item) {
-            $qtyByPo[(int)$item['purchase_order_id']][(string)$item['item_name']] = (float)$item['qty'];
+            $qtyByPo[(int)$item['purchase_order_id']][(string)$item['item_name']] = [
+                'qty' => (float)$item['qty'],
+                'cost' => (float)$item['cost'],
+            ];
         }
         foreach ($purchaseRows as &$purchaseRow) {
             $purchaseRow['products'] = $qtyByPo[(int)$purchaseRow['id']] ?? [];
@@ -1286,32 +1566,291 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
     $payableParams = $includePreviousAp ? [$to] : [$from, $to];
     $payableRows = api_table_exists($pdo, 'purchase_orders') ? mec_fetch_rows($pdo, "SELECT COALESCE(pv.name, '') AS supplier, COALESCE(po.order_number, CONCAT('PO-', po.id)) AS invoice, COALESCE(po.total_amount, 0) AS amount, COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0) AS paid, GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) AS balance, DATE_ADD(DATE(COALESCE(po.order_date, po.created_at)), INTERVAL 30 DAY) AS due_date, CASE WHEN DATE_ADD(DATE(COALESCE(po.order_date, po.created_at)), INTERVAL 30 DAY) < CURDATE() AND GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) > 0 THEN 'Overdue' WHEN GREATEST(COALESCE(po.total_amount,0) - COALESCE((SELECT SUM(pp.payment_amount) FROM purchase_payments pp WHERE pp.purchase_order_id = po.id), 0), 0) > 0 THEN 'Open' ELSE 'Paid' END AS status FROM purchase_orders po LEFT JOIN purchase_vendors pv ON pv.id = po.vendor_id WHERE $payableDateSql HAVING balance > 0 ORDER BY due_date ASC", $payableParams) : [];
 
-    $bankRows = [];
-    $bankNames = [];
-    if (api_table_exists($pdo, 'orders') && mec_has($pdo, 'orders', 'payment_method')) {
-        $bankNames = array_merge($bankNames, array_column(mec_fetch_rows($pdo, "SELECT DISTINCT payment_method AS name FROM orders WHERE payment_method IS NOT NULL AND payment_method <> '' LIMIT 40"), 'name'));
-    }
-    if (api_table_exists($pdo, 'finance_spending') && mec_has($pdo, 'finance_spending', 'payment_method')) {
-        $bankNames = array_merge($bankNames, array_column(mec_fetch_rows($pdo, "SELECT DISTINCT payment_method AS name FROM finance_spending WHERE payment_method IS NOT NULL AND payment_method <> '' LIMIT 40"), 'name'));
-    }
-    $bankNames = array_values(array_unique(array_filter(array_map('trim', $bankNames)))) ?: ['ABA', 'AC', 'Cash'];
-    foreach ($bankNames as $name) {
-        $in = mec_sum_online_between($pdo, ['total_amount', 'grand_total', 'amount'], $from, $to, 'o.payment_method = ' . $pdo->quote($name) . ' AND COALESCE(o.is_cancelled, 0) = 0');
-        $topup = mec_sum_between($pdo, 'finance_topups', ['amount'], ['topup_date', 'created_at'], $from, $to, mec_has($pdo, 'finance_topups', 'source') ? "source = " . $pdo->quote($name) : '');
-        $out = mec_sum_between($pdo, 'finance_spending', ['amount'], ['spending_date', 'created_at'], $from, $to, mec_has($pdo, 'finance_spending', 'payment_method') ? "payment_method = " . $pdo->quote($name) : '');
-        $bankRows[] = ['account' => $name, 'system' => $in + $topup - $out, 'actual' => '', 'reason' => '', 'statementDate' => $to, 'attachment' => ''];
-    }
+    $bankRows = mec_cash_bank_rows($pdo, $from, $to);
 
     $inventoryRows = mec_inventory_snapshot_rows($pdo, $month, $to);
 
-    $marketingRows = api_table_exists($pdo, 'marketing_takes') ? mec_fetch_rows($pdo, "SELECT COALESCE(request_code, CONCAT('MR-', id)) AS request_no, COALESCE(type, marketing_type, 'Marketing') AS type, COALESCE(product_name, item_name, '') AS product, COALESCE(quantity, issued_quantity, 0) AS issued, COALESCE(used_quantity, 0) AS used, COALESCE(returned_quantity, 0) AS returned, GREATEST(COALESCE(quantity, issued_quantity, 0) - COALESCE(used_quantity,0) - COALESCE(returned_quantity,0), 0) AS not_returned, CASE WHEN GREATEST(COALESCE(quantity, issued_quantity, 0) - COALESCE(used_quantity,0) - COALESCE(returned_quantity,0), 0) > 0 THEN 'Needs Review' ELSE 'Matched' END AS status FROM marketing_takes WHERE DATE(COALESCE(take_date, created_at)) BETWEEN ? AND ? LIMIT 120", [$from, $to]) : [];
+    $marketingRows = [];
+    $marketingProducts = [];
+    if (api_table_exists($pdo, 'marketing_takes')) {
+        $marketingSource = mec_fetch_rows(
+            $pdo,
+            "SELECT mt.id,
+                    COALESCE(NULLIF(TRIM(mt.take_code), ''), CONCAT('MT-#', mt.id)) AS request_no,
+                    COALESCE(mt.event_name, '') AS event_name,
+                    COALESCE(NULLIF(TRIM(mt.marketing_type), ''), 'Marketing') AS type,
+                    DATE(mt.event_date) AS event_date,
+                    COALESCE(mt.location, '') AS location,
+                    mt.status AS take_status,
+                    COALESCE(items.item_count, 0) AS item_count,
+                    COALESCE(items.total_taken, 0) AS taken,
+                    COALESCE(items.total_returned, 0) AS returned,
+                    COALESCE(items.total_not_returned, 0) AS not_returned
+             FROM marketing_takes mt
+             LEFT JOIN (
+                SELECT marketing_take_id,
+                       COUNT(*) AS item_count,
+                       SUM(quantity_taken) AS total_taken,
+                       SUM(quantity_returned) AS total_returned,
+                       SUM(quantity_not_returned) AS total_not_returned
+                FROM marketing_take_items
+                GROUP BY marketing_take_id
+             ) items ON items.marketing_take_id = mt.id
+             WHERE mt.event_date BETWEEN ? AND ?
+               AND mt.status <> 'rejected'
+             ORDER BY mt.event_date ASC, mt.id ASC",
+            [$from, $to]
+        );
+        foreach ($marketingSource as $source) {
+            $takeStatus = (string)($source['take_status'] ?? '');
+            $stockOut = in_array($takeStatus, ['pending', 'completed'], true);
+            $taken = (float)($source['taken'] ?? 0);
+            $returned = (float)($source['returned'] ?? 0);
+            $notReturned = (float)($source['not_returned'] ?? 0);
+            $remaining = $stockOut ? max(0, $taken - $returned - $notReturned) : 0.0;
+            $marketingRows[] = [
+                'request_no' => (string)$source['request_no'],
+                'event_name' => (string)$source['event_name'],
+                'type' => ucwords(str_replace('_', ' ', (string)$source['type'])),
+                'event_date' => (string)$source['event_date'],
+                'location' => (string)$source['location'],
+                'issued' => $stockOut ? $taken : 0.0,
+                'returned' => $stockOut ? $returned : 0.0,
+                'not_returned' => $stockOut ? $notReturned : 0.0,
+                'remaining' => $remaining,
+                'status' => $takeStatus === 'pending' || $remaining > 0.0001 ? 'In Marketing' : ($takeStatus === 'completed' ? 'Completed' : 'Pending Approval'),
+            ];
+        }
+        if (api_table_exists($pdo, 'marketing_take_items') && api_table_exists($pdo, 'products')) {
+            $productSource = mec_fetch_rows(
+                $pdo,
+                "SELECT COALESCE(NULLIF(TRIM(p.name), ''), 'Product') AS product,
+                        COALESCE(p.sku, '') AS sku,
+                        COUNT(DISTINCT mt.id) AS events,
+                        COALESCE(SUM(mti.quantity_taken), 0) AS issued,
+                        COALESCE(SUM(mti.quantity_returned), 0) AS returned,
+                        COALESCE(SUM(mti.quantity_not_returned), 0) AS not_returned
+                 FROM marketing_take_items mti
+                 JOIN marketing_takes mt ON mt.id = mti.marketing_take_id
+                 JOIN products p ON p.id = mti.product_id
+                 WHERE mt.event_date BETWEEN ? AND ?
+                   AND mt.status IN ('pending', 'completed')
+                 GROUP BY p.id, p.name, p.sku
+                 ORDER BY p.name ASC",
+                [$from, $to]
+            );
+            foreach ($productSource as $product) {
+                $issued = (float)($product['issued'] ?? 0);
+                $returned = (float)($product['returned'] ?? 0);
+                $notReturned = (float)($product['not_returned'] ?? 0);
+                $remaining = max(0, $issued - $returned - $notReturned);
+                $marketingProducts[] = [
+                    'product' => (string)$product['product'],
+                    'sku' => (string)$product['sku'],
+                    'events' => (int)$product['events'],
+                    'issued' => $issued,
+                    'returned' => $returned,
+                    'not_returned' => $notReturned,
+                    'remaining' => $remaining,
+                    'status' => $remaining > 0.0001 ? 'In Marketing' : 'Completed',
+                ];
+            }
+        }
+    }
 
-    $adjustmentRows = api_table_exists($pdo, 'inventory_movements') ? mec_fetch_rows($pdo, "SELECT COALESCE(reference_no, CONCAT('ADJ-', id)) AS adjustment_no, item_name AS product, COALESCE(sl.name, '') AS location, 0 AS system_qty, 0 AS physical_qty, COALESCE(quantity, 0) AS difference_qty, COALESCE(reason, movement_type, 'Correction') AS reason, COALESCE(u.name, u.username, '') AS created_by, 'Approved' AS approval_status, COALESCE(u.name, u.username, '') AS approved_by FROM inventory_movements im LEFT JOIN storage_locations sl ON sl.id = COALESCE(im.to_location_id, im.from_location_id) LEFT JOIN users u ON u.id = im.user_id WHERE LOWER(COALESCE(movement_type,'')) LIKE '%adjust%' AND DATE(COALESCE(movement_date, created_at)) BETWEEN ? AND ? ORDER BY im.id DESC LIMIT 120", [$from, $to]) : [];
+    $adjustmentRows = [];
+    $adjustmentSeen = [];
+    $adjustmentSource = [];
+    if (api_table_exists($pdo, 'stock_movements') && mec_has($pdo, 'stock_movements', 'movement_type') && mec_has($pdo, 'stock_movements', 'quantity')) {
+        $dateCol = mec_has($pdo, 'stock_movements', 'created_at') ? 'sm.created_at' : (mec_has($pdo, 'stock_movements', 'movement_date') ? 'sm.movement_date' : '');
+        $itemCol = mec_has($pdo, 'stock_movements', 'item_id') ? 'item_id' : (mec_has($pdo, 'stock_movements', 'product_id') ? 'product_id' : '');
+        if ($dateCol !== '' && $itemCol !== '') {
+            $locationExpr = mec_location_name_expr($pdo, 'sl');
+            $hasFrom = mec_has($pdo, 'stock_movements', 'from_storage_location_id');
+            $hasTo = mec_has($pdo, 'stock_movements', 'to_storage_location_id');
+            $locJoinId = '0';
+            if ($hasFrom && $hasTo) {
+                $locJoinId = "CASE WHEN LOWER(sm.movement_type) = 'in' AND COALESCE(sm.to_storage_location_id, 0) > 0 THEN sm.to_storage_location_id ELSE sm.from_storage_location_id END";
+            } elseif ($hasFrom) {
+                $locJoinId = 'sm.from_storage_location_id';
+            } elseif ($hasTo) {
+                $locJoinId = 'sm.to_storage_location_id';
+            }
+            $codeExpr = mec_has($pdo, 'stock_movements', 'reference_id') ? "COALESCE(NULLIF(TRIM(CAST(sm.reference_id AS CHAR)), ''), '')" : "''";
+            $refTypeExpr = mec_has($pdo, 'stock_movements', 'reference_type') ? "LOWER(COALESCE(sm.reference_type, ''))" : "''";
+            $notesExpr = mec_has($pdo, 'stock_movements', 'notes') ? "COALESCE(sm.notes, '')" : "''";
+            $createdExpr = mec_has($pdo, 'stock_movements', 'created_by') ? "COALESCE(CAST(sm.created_by AS CHAR), '')" : "''";
+            $productJoin = api_table_exists($pdo, 'products') ? "LEFT JOIN products p ON p.id = sm.{$itemCol}" : '';
+            $productExpr = api_table_exists($pdo, 'products') ? "COALESCE(NULLIF(TRIM(p.name), ''), CONCAT('Product #', sm.{$itemCol}))" : "CONCAT('Product #', sm.{$itemCol})";
+            $skuExpr = api_table_exists($pdo, 'products') && mec_has($pdo, 'products', 'sku') ? "COALESCE(p.sku, '')" : "''";
+            $userJoin = api_table_exists($pdo, 'users') ? "LEFT JOIN users u ON u.username = {$createdExpr} OR CAST(u.id AS CHAR) = {$createdExpr}" : '';
+            $createdSelect = api_table_exists($pdo, 'users') ? "COALESCE(NULLIF(TRIM(u.name), ''), NULLIF(TRIM(u.username), ''), {$createdExpr})" : $createdExpr;
+            $whereRef = "{$codeExpr} REGEXP '^(OUT|IN|ADJ)-'";
+            if ($refTypeExpr !== "''") {
+                $whereRef = "{$refTypeExpr} = 'adjustment' AND {$codeExpr} NOT REGEXP '^DO'";
+            }
+            $adjustmentSource = mec_fetch_rows(
+                $pdo,
+                "SELECT sm.id,
+                        {$codeExpr} AS adjustment_no,
+                        LOWER(sm.movement_type) AS movement_type,
+                        DATE({$dateCol}) AS movement_date,
+                        {$productExpr} AS product,
+                        {$skuExpr} AS sku,
+                        {$locationExpr} AS location,
+                        COALESCE(sm.quantity, 0) AS difference_qty,
+                        {$notesExpr} AS reason,
+                        {$createdSelect} AS created_by
+                 FROM stock_movements sm
+                 {$productJoin}
+                 LEFT JOIN storage_locations sl ON sl.id = {$locJoinId}
+                 {$userJoin}
+                 WHERE DATE({$dateCol}) BETWEEN ? AND ?
+                   AND LOWER(sm.movement_type) IN ('in', 'out', 'adjustment')
+                   AND {$whereRef}
+                 ORDER BY movement_date ASC, sm.id ASC",
+                [$from, $to]
+            );
+        }
+    }
+    if (api_table_exists($pdo, 'inventory_movements')) {
+        $locationExpr = mec_location_name_expr($pdo, 'sl');
+        $inventorySource = mec_fetch_rows(
+            $pdo,
+            "SELECT im.id,
+                    COALESCE(NULLIF(TRIM(im.reference_no), ''), '') AS adjustment_no,
+                    LOWER(COALESCE(im.movement_type, '')) AS movement_type,
+                    DATE(COALESCE(im.movement_date, im.created_at)) AS movement_date,
+                    COALESCE(NULLIF(TRIM(im.item_name), ''), 'Product') AS product,
+                    COALESCE(im.sku, '') AS sku,
+                    {$locationExpr} AS location,
+                    COALESCE(im.quantity, 0) AS difference_qty,
+                    COALESCE(im.reason, '') AS reason,
+                    COALESCE(NULLIF(u.name, ''), u.username, '') AS created_by
+             FROM inventory_movements im
+             LEFT JOIN storage_locations sl ON sl.id = CASE
+                 WHEN COALESCE(im.to_location_id, 0) > 0 THEN im.to_location_id
+                 ELSE im.from_location_id
+             END
+             LEFT JOIN users u ON u.id = im.user_id
+             WHERE DATE(COALESCE(im.movement_date, im.created_at)) BETWEEN ? AND ?
+               AND LOWER(COALESCE(im.reference_type, '')) = 'adjustment'
+               AND COALESCE(im.reference_no, '') NOT REGEXP '^DO'
+               AND (
+                 LOWER(im.movement_type) IN ('adjustment', 'in', 'out', 'purchase_in', 'sale_out')
+                 OR COALESCE(im.reference_no, '') REGEXP '^(OUT|IN|ADJ)-'
+               )
+             ORDER BY movement_date ASC, im.id ASC",
+            [$from, $to]
+        );
+        foreach ($adjustmentSource as $source) {
+            $codeKey = strtoupper(trim((string)($source['adjustment_no'] ?? '')));
+            if ($codeKey !== '') $adjustmentSeen[$codeKey] = true;
+        }
+        foreach ($inventorySource as $source) {
+            $codeKey = strtoupper(trim((string)($source['adjustment_no'] ?? '')));
+            if ($codeKey !== '' && isset($adjustmentSeen[$codeKey])) continue;
+            $adjustmentSource[] = $source;
+            if ($codeKey !== '') $adjustmentSeen[$codeKey] = true;
+        }
+    }
+        foreach ($adjustmentSource as $source) {
+            $notes = trim((string)($source['reason'] ?? ''));
+            $reason = $notes;
+            if (preg_match('/^Reason:\s*(.+)$/mi', $notes, $reasonMatch)) {
+                $reason = trim($reasonMatch[1]);
+                if (preg_match('/^Note:\s*(.+)$/mi', $notes, $noteMatch) && trim($noteMatch[1]) !== '') {
+                    $reason .= ' — ' . trim($noteMatch[1]);
+                }
+            }
+            $movementType = strtolower((string)($source['movement_type'] ?? 'adjustment'));
+            $qty = (float)($source['difference_qty'] ?? 0);
+            $kind = 'adjustment';
+            $prefix = 'ADJ-';
+            if (in_array($movementType, ['out', 'sale_out'], true)) {
+                $kind = 'out';
+                $prefix = 'OUT-';
+                $qty = -abs($qty);
+            } elseif (in_array($movementType, ['in', 'purchase_in'], true)) {
+                $kind = 'in';
+                $prefix = 'IN-';
+                $qty = abs($qty);
+            }
+            $code = trim((string)($source['adjustment_no'] ?? ''));
+            if ($code === '') $code = $prefix . (int)($source['id'] ?? 0);
+            if (preg_match('/^DO/i', $code)) continue;
+            $adjustmentRows[] = [
+                'id' => (int)($source['id'] ?? 0),
+                'adjustment_no' => $code,
+                'movement_kind' => $kind,
+                'movement_date' => (string)($source['movement_date'] ?? ''),
+                'product' => (string)($source['product'] ?? ''),
+                'sku' => (string)($source['sku'] ?? ''),
+                'location' => (string)($source['location'] ?? ''),
+                'difference_qty' => $qty,
+                'reason' => $reason !== '' ? $reason : '—',
+                'created_by' => (string)($source['created_by'] ?? ''),
+                'approval_status' => 'Approved',
+            ];
+        }
 
     $expenses = [];
+    $expenseGroups = [];
+    $expenseSummary = ['posted_amount' => 0.0, 'posted_count' => 0, 'pending_amount' => 0.0, 'pending_count' => 0];
     if (api_table_exists($pdo, 'finance_spending')) {
-        $expenseRows = mec_fetch_rows($pdo, "SELECT COALESCE(category, 'Other') AS category, COALESCE(SUM(amount), 0) AS amount FROM finance_spending WHERE DATE(COALESCE(spending_date, created_at)) BETWEEN ? AND ? GROUP BY COALESCE(category, 'Other') ORDER BY amount DESC LIMIT 40", [$from, $to]);
-        foreach ($expenseRows as $row) $expenses[] = [$row['category'], (float)$row['amount']];
+        $postedStatus = "(TRIM(COALESCE(status, '')) = '' OR LOWER(status) IN ('approved', 'completed'))";
+        $expenseRows = mec_fetch_rows(
+            $pdo,
+            "SELECT COALESCE(NULLIF(TRIM(category), ''), 'Uncategorized') AS category,
+                    COALESCE(NULLIF(TRIM(SUBSTRING_INDEX(sub_category, ',', 1)), ''), 'General') AS sub_category,
+                    COALESCE(SUM(amount), 0) AS amount
+             FROM finance_spending
+             WHERE DATE(spending_date) BETWEEN ? AND ?
+               AND $postedStatus
+             GROUP BY COALESCE(NULLIF(TRIM(category), ''), 'Uncategorized'),
+                      COALESCE(NULLIF(TRIM(SUBSTRING_INDEX(sub_category, ',', 1)), ''), 'General')
+             ORDER BY category ASC, amount DESC",
+            [$from, $to]
+        );
+        $expenseGroupMap = [];
+        foreach ($expenseRows as $row) {
+            $category = (string)$row['category'];
+            if (!isset($expenseGroupMap[$category])) {
+                $expenseGroupMap[$category] = ['category' => $category, 'total' => 0.0, 'balance' => 0.0, 'rows' => []];
+            }
+            $amount = (float)$row['amount'];
+            $expenseGroupMap[$category]['total'] += $amount;
+            $expenseGroupMap[$category]['rows'][] = [
+                'label' => (string)$row['sub_category'],
+                'amount' => $amount,
+                'balance' => 0.0,
+            ];
+        }
+        $expenseGroups = array_values($expenseGroupMap);
+        usort($expenseGroups, static fn(array $left, array $right): int => $right['total'] <=> $left['total'] ?: strcmp($left['category'], $right['category']));
+        foreach ($expenseGroups as &$expenseGroup) {
+            usort($expenseGroup['rows'], static fn(array $left, array $right): int => $right['amount'] <=> $left['amount'] ?: strcmp($left['label'], $right['label']));
+        }
+        unset($expenseGroup);
+        foreach ($expenseGroups as $expenseGroup) $expenses[] = [$expenseGroup['category'], (float)$expenseGroup['total']];
+        $expenseTotals = mec_fetch_rows(
+            $pdo,
+            "SELECT
+                COALESCE(SUM(CASE WHEN $postedStatus THEN amount ELSE 0 END), 0) AS posted_amount,
+                COALESCE(SUM(CASE WHEN $postedStatus THEN 1 ELSE 0 END), 0) AS posted_count,
+                COALESCE(SUM(CASE WHEN NOT ($postedStatus) THEN amount ELSE 0 END), 0) AS pending_amount,
+                COALESCE(SUM(CASE WHEN NOT ($postedStatus) THEN 1 ELSE 0 END), 0) AS pending_count
+             FROM finance_spending
+             WHERE DATE(spending_date) BETWEEN ? AND ?",
+            [$from, $to]
+        );
+        $expenseTotal = $expenseTotals[0] ?? [];
+        $expenseSummary = [
+            'posted_amount' => (float)($expenseTotal['posted_amount'] ?? 0),
+            'posted_count' => (int)($expenseTotal['posted_count'] ?? 0),
+            'pending_amount' => (float)($expenseTotal['pending_amount'] ?? 0),
+            'pending_count' => (int)($expenseTotal['pending_count'] ?? 0),
+        ];
     }
 
     return [
@@ -1354,14 +1893,18 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
         ],
         'receivable' => $receivableRows,
         'receivable_summary' => $receivableSummary,
+        'receivable_collections' => mec_prior_ar_collections($pdo, $from, $to),
         'purchase' => $purchaseRows,
         'purchase_closing' => $purchaseClosing,
         'payable' => $payableRows,
         'cashBank' => $bankRows,
         'inventory' => $inventoryRows,
         'marketing' => $marketingRows,
+        'marketing_products' => $marketingProducts,
         'adjustments' => $adjustmentRows,
         'expenses' => $expenses,
+        'expense_groups' => $expenseGroups,
+        'expense_summary' => $expenseSummary,
     ];
 }
 
@@ -1371,14 +1914,65 @@ function mec_merge_actuals(array $rows, array $steps): array
         $key = (string)$step['step_key'];
         $actual = json_decode((string)($step['actual_json'] ?? ''), true);
         if (!is_array($actual)) continue;
-        if ($key === 'cash_bank' && isset($actual['cashBank']) && is_array($actual['cashBank'])) $rows['cashBank'] = $actual['cashBank'];
+        if ($key === 'cash_bank' && isset($actual['cashBank']) && is_array($actual['cashBank'])) {
+            $savedByAccount = [];
+            foreach ($actual['cashBank'] as $savedRow) {
+                if (!is_array($savedRow)) continue;
+                $savedName = trim((string)($savedRow['account'] ?? ''));
+                if ($savedName !== '') $savedByAccount[$savedName] = $savedRow;
+            }
+            if (strtoupper((string)($step['status'] ?? '')) === 'LOCKED') {
+                $rows['cashBank'] = array_values($savedByAccount);
+            } else {
+                $liveNames = [];
+                foreach ($rows['cashBank'] as &$bankRow) {
+                    $liveName = trim((string)($bankRow['account'] ?? ''));
+                    $liveNames[$liveName] = true;
+                    if (!isset($savedByAccount[$liveName])) continue;
+                    $savedRow = $savedByAccount[$liveName];
+                    if ((string)($savedRow['actual'] ?? '') !== '') $bankRow['actual'] = $savedRow['actual'];
+                    $bankRow['reason'] = (string)($savedRow['reason'] ?? '');
+                    if (trim((string)($savedRow['statementDate'] ?? '')) !== '') $bankRow['statementDate'] = $savedRow['statementDate'];
+                    $bankRow['attachment'] = (string)($savedRow['attachment'] ?? '');
+                }
+                unset($bankRow);
+                foreach ($savedByAccount as $savedName => $savedRow) {
+                    if (!isset($liveNames[$savedName])) $rows['cashBank'][] = $savedRow;
+                }
+            }
+        }
         if ($key === 'inventory' && isset($actual['inventory']) && is_array($actual['inventory'])) $rows['inventory'] = $actual['inventory'];
         if ($key === 'receivable' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['receivable'], $actual['receivable_summary']) && is_array($actual['receivable']) && is_array($actual['receivable_summary'])) {
             $rows['receivable'] = $actual['receivable'];
             $rows['receivable_summary'] = $actual['receivable_summary'];
+            if (isset($actual['receivable_collections']) && is_array($actual['receivable_collections'])) {
+                $rows['receivable_collections'] = $actual['receivable_collections'];
+            }
         }
         if ($key === 'payable' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['payable']) && is_array($actual['payable'])) {
             $rows['payable'] = $actual['payable'];
+        }
+        if ($key === 'purchase' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['purchase'], $actual['purchase_closing']) && is_array($actual['purchase']) && is_array($actual['purchase_closing'])) {
+            $rows['purchase'] = $actual['purchase'];
+            $rows['purchase_closing'] = $actual['purchase_closing'];
+        }
+        if ($key === 'expenses' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['expenses'], $actual['expense_groups'], $actual['expense_summary']) && is_array($actual['expenses']) && is_array($actual['expense_groups']) && is_array($actual['expense_summary'])) {
+            $rows['expenses'] = $actual['expenses'];
+            $rows['expense_groups'] = $actual['expense_groups'];
+            $rows['expense_summary'] = $actual['expense_summary'];
+        }
+        if ($key === 'marketing_stock' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED') {
+            if (isset($actual['marketing']) && is_array($actual['marketing'])) $rows['marketing'] = $actual['marketing'];
+            if (isset($actual['marketing_products']) && is_array($actual['marketing_products'])) $rows['marketing_products'] = $actual['marketing_products'];
+            if (isset($actual['marketing_snapshot']) && is_array($actual['marketing_snapshot'])) $rows['marketing_snapshot'] = $actual['marketing_snapshot'];
+        }
+        if ($key === 'adjustments' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['adjustments']) && is_array($actual['adjustments'])) {
+            $rows['adjustments'] = $actual['adjustments'];
+        }
+        if ($key === 'sales' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && !empty($actual['sales_frozen'])) {
+            if (isset($actual['sales']) && is_array($actual['sales'])) $rows['sales'] = $actual['sales'];
+            $rows['sales_orders'] = is_array($actual['sales_orders'] ?? null) ? $actual['sales_orders'] : [];
+            $rows['sales_frozen'] = true;
         }
     }
     return $rows;
@@ -1406,6 +2000,8 @@ function mec_step_records(PDO $pdo, int $closingId, array $rows): array
             'note' => (string)($row['note'] ?? ''),
             'reviewed_by' => isset($row['reviewed_by']) ? mec_user_name($pdo, $row['reviewed_by']) : '',
             'reviewed_at' => (string)($row['reviewed_at'] ?? ''),
+            'updated_by' => isset($row['updated_by']) ? mec_user_name($pdo, $row['updated_by']) : '',
+            'updated_at' => (string)($row['updated_at'] ?? ''),
         ];
     }
     return $result;
@@ -1425,7 +2021,7 @@ function mec_issue_count(string $key, array $rows): int
     if ($key === 'payable') return count(array_filter($rows['payable'] ?? [], static fn($row) => ($row['status'] ?? '') === 'Overdue'));
     if ($key === 'cash_bank') return count(array_filter($rows['cashBank'] ?? [], static fn($row) => isset($row['actual']) && (string)$row['actual'] !== '' && abs((float)$row['actual'] - (float)($row['system'] ?? 0)) > 0.004 && trim((string)($row['reason'] ?? '')) === ''));
     if ($key === 'inventory') return count(array_filter($rows['inventory'] ?? [], static fn($row) => isset($row['physical']) && (string)$row['physical'] !== '' && abs((float)$row['physical'] - mec_expected_inventory($row)) > 0.004));
-    if ($key === 'marketing_stock') return count(array_filter($rows['marketing'] ?? [], static fn($row) => (float)($row['not_returned'] ?? 0) > 0));
+    if ($key === 'marketing_stock') return count(array_filter($rows['marketing'] ?? [], static fn($row) => (float)($row['remaining'] ?? 0) > 0.0001));
     if ($key === 'adjustments') return count(array_filter($rows['adjustments'] ?? [], static fn($row) => !in_array((string)($row['approval_status'] ?? ''), ['Approved', 'approved'], true)));
     return 0;
 }
@@ -1551,9 +2147,9 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
     $inventoryExpected = array_reduce($inventoryRows, static fn(float $sum, array $row): float => $sum + mec_expected_inventory($row), 0.0);
     $inventoryPhysical = array_reduce($inventoryRows, static fn(float $sum, array $row): float => $sum + (((string)($row['physical'] ?? '') !== '') ? (float)$row['physical'] : mec_expected_inventory($row)), 0.0);
     $marketingIssued = mec_sum_assoc($marketingRows, 'issued');
-    $marketingUsed = mec_sum_assoc($marketingRows, 'used');
     $marketingReturned = mec_sum_assoc($marketingRows, 'returned');
     $marketingNotReturned = mec_sum_assoc($marketingRows, 'not_returned');
+    $marketingStillOut = mec_sum_assoc($marketingRows, 'remaining');
     $criticalIssues = mec_issue_count('cash_bank', $rows) + mec_issue_count('adjustments', $rows);
     $openIssues = array_reduce(array_keys(MEC_STEPS), static fn(int $sum, string $key): int => $sum + mec_issue_count($key, $rows), 0);
 
@@ -1569,6 +2165,7 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
         'generated_at' => date('Y-m-d H:i:s'),
         'prepared_by' => mec_user_name($pdo, $closing['created_by'] ?? 0),
         'approved_by' => mec_user_name($pdo, $closing['approved_by'] ?? 0),
+        'approved_at' => (string)($closing['approved_at'] ?? ''),
         'closed_by' => mec_user_name($pdo, $closing['closed_by'] ?? 0),
         'closed_at' => (string)($closing['closed_at'] ?? ''),
         'kpis' => [
@@ -1595,6 +2192,7 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
             'dealer_receivable' => mec_system_value('receivable', $rows),
             'outstanding' => mec_system_value('receivable', $rows),
             'overdue' => array_reduce($rows['receivable'] ?? [], static fn(float $sum, array $row): float => $sum + (mec_days_overdue((string)($row['due_date'] ?? '')) > 0 ? (float)($row['outstanding'] ?? 0) : 0.0), 0.0),
+            'prior_collected' => array_reduce($rows['receivable_collections'] ?? [], static fn(float $sum, array $row): float => $sum + (float)($row['collected'] ?? 0), 0.0),
         ],
         'purchase' => [
             'orders' => (int)($rows['purchase_closing']['summary']['order_count'] ?? count($rows['purchase'] ?? [])),
@@ -1629,14 +2227,16 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
         ],
         'marketing' => [
             'issued' => $marketingIssued,
-            'used' => $marketingUsed,
             'returned' => $marketingReturned,
             'not_returned' => $marketingNotReturned,
+            'still_out' => $marketingStillOut,
             'unresolved' => mec_issue_count('marketing_stock', $rows),
         ],
         'adjustments' => [
             'count' => count($adjustmentRows),
             'quantity' => mec_sum_assoc($adjustmentRows, 'difference_qty'),
+            'increase' => array_reduce($adjustmentRows, static fn(float $sum, array $row): float => $sum + ((float)($row['difference_qty'] ?? 0) > 0 ? (float)$row['difference_qty'] : 0.0), 0.0),
+            'decrease' => array_reduce($adjustmentRows, static fn(float $sum, array $row): float => $sum + ((float)($row['difference_qty'] ?? 0) < 0 ? (float)$row['difference_qty'] : 0.0), 0.0),
             'approved' => count(array_filter($adjustmentRows, static fn(array $row): bool => in_array((string)($row['approval_status'] ?? ''), ['Approved', 'approved'], true))),
             'pending' => mec_issue_count('adjustments', $rows),
         ],
@@ -1668,6 +2268,13 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
             'final_approval_status' => (string)($closing['final_approval_status'] ?? 'Pending'),
         ],
     ];
+}
+
+function mec_required_note(array $payload): string
+{
+    $note = trim((string)($payload['note'] ?? ''));
+    if ($note === '') api_error('Review note is required before closing.', 422);
+    return $note;
 }
 
 function mec_save_step(PDO $pdo, int $closingId, string $key, string $status, string $note, array $actuals, array $rows): void
@@ -1717,6 +2324,7 @@ function mec_response(PDO $pdo, string $month): void
     ]);
 }
 
+if (!defined('MEC_LIBRARY_ONLY')) {
 try {
     $pdo = get_db_connection();
     mec_ensure_schema($pdo);
@@ -1738,25 +2346,162 @@ try {
             api_error(date('F Y', strtotime($month . '-01')) . ' is closed. Transactions for this accounting period cannot be modified.', 409);
         }
 
+        if ($action === 'unlock_step') {
+            $key = trim((string)($payload['step_key'] ?? ''));
+            $lockable = ['sales', 'receivable', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments'];
+            if (!in_array($key, $lockable, true)) {
+                api_error('This step cannot be unlocked.', 422);
+            }
+            $saved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === $key) $saved = $savedStep;
+            }
+            if (strtoupper((string)($saved['status'] ?? '')) !== 'LOCKED') {
+                api_error('This step is not locked.', 409);
+            }
+            $reason = trim((string)($payload['reason'] ?? ''));
+            $note = trim((string)($payload['note'] ?? ''));
+            if ($reason === '') api_error('Unlock reason is required.', 422);
+            if ($note === '') api_error('Unlock note is required.', 422);
+            $stmt = $pdo->prepare("UPDATE month_end_closing_steps SET status = 'NEEDS_REVIEW', note = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP, reviewed_by = NULL, reviewed_at = NULL WHERE closing_id = ? AND step_key = ?");
+            $stmt->execute([$note, $userId, $closingId, $key]);
+            $pdo->prepare("UPDATE month_end_closings SET final_approval_status = 'Pending', reports_generated_at = NULL, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$userId, $closingId]);
+            $pdo->prepare("UPDATE month_end_closing_steps SET status = 'NEEDS_REVIEW', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE closing_id = ? AND step_key = 'final_review' AND status = 'REVIEWED'")->execute([$userId, $closingId]);
+            mec_log($pdo, $closingId, $key, 'unlock', $reason . ' — ' . $note, ['reason' => $reason, 'note' => $note]);
+            mec_response($pdo, $month);
+        }
+
         if ($action === 'close_sales') {
             if (mec_issue_count('sales', $rows) > 0) {
                 api_error('Finish pending or incomplete orders before closing sales.', 422);
             }
-            mec_save_step($pdo, $closingId, 'sales', 'LOCKED', trim((string)($payload['note'] ?? '')), [], $rows);
+            $from = mec_month_start($month);
+            $to = mec_month_end($month);
+            $onlineActive = "COALESCE(o.is_cancelled, 0) = 0 AND COALESCE(o.is_returned, 0) = 0 AND LOWER(COALESCE(o.status, '')) NOT IN ('cancel', 'cancelled', 'canceled', 'return', 'returned', 'draft')";
+            $offlineActive = "LOWER(COALESCE(status,'')) NOT IN ('cancel','cancelled','canceled','return','returned')";
+            $dealerActive = "LOWER(COALESCE(status,'')) NOT IN ('cancel','cancelled','canceled','return','returned')";
+            mec_save_step($pdo, $closingId, 'sales', 'LOCKED', mec_required_note($payload), [
+                'sales_frozen' => true,
+                'sales' => $rows['sales'] ?? [],
+                'sales_orders' => mec_sales_order_details($pdo, $from, $to, $onlineActive, $offlineActive, $dealerActive),
+            ], $rows);
             mec_response($pdo, $month);
         }
 
         if ($action === 'close_receivable') {
-            mec_save_step($pdo, $closingId, 'receivable', 'LOCKED', trim((string)($payload['note'] ?? '')), [
+            mec_save_step($pdo, $closingId, 'receivable', 'LOCKED', mec_required_note($payload), [
                 'receivable' => $rows['receivable'] ?? [],
                 'receivable_summary' => $rows['receivable_summary'] ?? [],
+                'receivable_collections' => $rows['receivable_collections'] ?? [],
+                'include_previous_ar' => !empty($_GET['include_previous_ar']),
             ], $rows);
             mec_response($pdo, $month);
         }
 
         if ($action === 'close_payable') {
-            mec_save_step($pdo, $closingId, 'payable', 'LOCKED', trim((string)($payload['note'] ?? '')), [
+            mec_save_step($pdo, $closingId, 'payable', 'LOCKED', mec_required_note($payload), [
                 'payable' => $rows['payable'] ?? [],
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_purchase') {
+            $purchaseSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'purchase') $purchaseSaved = $savedStep;
+            }
+            if (strtoupper((string)($purchaseSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Purchase / Supplier Closing is locked. Changes require manager unlock.', 409);
+            }
+            if (mec_issue_count('purchase', $rows) > 0) {
+                api_error('Finish incomplete purchase records before closing.', 422);
+            }
+            mec_save_step($pdo, $closingId, 'purchase', 'LOCKED', mec_required_note($payload), [
+                'purchase' => $rows['purchase'] ?? [],
+                'purchase_closing' => $rows['purchase_closing'] ?? [],
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_expense') {
+            $expenseSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'expenses') $expenseSaved = $savedStep;
+            }
+            if (strtoupper((string)($expenseSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Expense Closing is locked. Changes require manager unlock.', 409);
+            }
+            mec_save_step($pdo, $closingId, 'expenses', 'LOCKED', mec_required_note($payload), [
+                'expenses' => $rows['expenses'] ?? [],
+                'expense_groups' => $rows['expense_groups'] ?? [],
+                'expense_summary' => $rows['expense_summary'] ?? [],
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_marketing_stock') {
+            $marketingSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'marketing_stock') $marketingSaved = $savedStep;
+            }
+            if (strtoupper((string)($marketingSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Marketing Stock is locked. Changes require manager unlock.', 409);
+            }
+            $postedSnapshot = is_array($payload['snapshot'] ?? null) ? $payload['snapshot'] : [];
+            mec_save_step($pdo, $closingId, 'marketing_stock', 'LOCKED', mec_required_note($payload), [
+                'marketing' => $rows['marketing'] ?? [],
+                'marketing_products' => $rows['marketing_products'] ?? [],
+                'marketing_snapshot' => [
+                    'events' => (float)($postedSnapshot['events'] ?? 0),
+                    'pending' => (float)($postedSnapshot['pending'] ?? 0),
+                    'taken' => (float)($postedSnapshot['taken'] ?? 0),
+                    'returned' => (float)($postedSnapshot['returned'] ?? 0),
+                    'still_out' => (float)($postedSnapshot['still_out'] ?? 0),
+                    'rows' => is_array($postedSnapshot['rows'] ?? null) ? $postedSnapshot['rows'] : [],
+                    'requests' => is_array($postedSnapshot['requests'] ?? null) ? $postedSnapshot['requests'] : [],
+                ],
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_cash_bank') {
+            $cashSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'cash_bank') $cashSaved = $savedStep;
+            }
+            if (strtoupper((string)($cashSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Cash & Bank Reconciliation is locked. Changes require manager unlock.', 409);
+            }
+            $postedActuals = is_array($payload['actuals'] ?? null) ? $payload['actuals'] : [];
+            $postedCash = is_array($postedActuals['cashBank'] ?? null) ? $postedActuals['cashBank'] : ($rows['cashBank'] ?? []);
+            if (!$postedCash) {
+                api_error('Enter the statement balance for every bank account before closing.', 422);
+            }
+            foreach ($postedCash as $cashRow) {
+                if (!is_array($cashRow) || trim((string)($cashRow['actual'] ?? '')) === '') {
+                    api_error('Enter the statement balance for every bank account before closing.', 422);
+                }
+            }
+            mec_save_step($pdo, $closingId, 'cash_bank', 'LOCKED', mec_required_note($payload), [
+                'cashBank' => $postedCash,
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_adjustments') {
+            $adjustmentSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'adjustments') $adjustmentSaved = $savedStep;
+            }
+            if (strtoupper((string)($adjustmentSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Stock Adjustments is locked. Changes require manager unlock.', 409);
+            }
+            if (mec_issue_count('adjustments', $rows) > 0) {
+                api_error('Approve pending adjustments before closing.', 422);
+            }
+            $postedAdjustments = is_array($payload['snapshot'] ?? null) ? $payload['snapshot'] : ($rows['adjustments'] ?? []);
+            mec_save_step($pdo, $closingId, 'adjustments', 'LOCKED', mec_required_note($payload), [
+                'adjustments' => $postedAdjustments,
             ], $rows);
             mec_response($pdo, $month);
         }
@@ -1768,10 +2513,20 @@ try {
             $salesSaved = null;
             $receivableSaved = null;
             $payableSaved = null;
+            $cashSaved = null;
+            $purchaseSaved = null;
+            $expenseSaved = null;
+            $marketingSaved = null;
+            $adjustmentSaved = null;
             foreach ($savedSteps as $savedStep) {
                 if ((string)($savedStep['step_key'] ?? '') === 'sales') $salesSaved = $savedStep;
                 if ((string)($savedStep['step_key'] ?? '') === 'receivable') $receivableSaved = $savedStep;
                 if ((string)($savedStep['step_key'] ?? '') === 'payable') $payableSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'cash_bank') $cashSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'purchase') $purchaseSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'expenses') $expenseSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'marketing_stock') $marketingSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'adjustments') $adjustmentSaved = $savedStep;
             }
             if ($key === 'sales' && strtoupper((string)($salesSaved['status'] ?? '')) === 'LOCKED') {
                 api_error('Sales Closing is locked. Changes require manager unlock.', 409);
@@ -1781,6 +2536,21 @@ try {
             }
             if ($key === 'payable' && strtoupper((string)($payableSaved['status'] ?? '')) === 'LOCKED') {
                 api_error('Accounts Payable is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'cash_bank' && strtoupper((string)($cashSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Cash & Bank Reconciliation is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'purchase' && strtoupper((string)($purchaseSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Purchase / Supplier Closing is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'expenses' && strtoupper((string)($expenseSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Expense Closing is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'marketing_stock' && strtoupper((string)($marketingSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Marketing Stock is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'adjustments' && strtoupper((string)($adjustmentSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Stock Adjustments is locked. Changes require manager unlock.', 409);
             }
             if ($key === 'cash_bank' && isset($actuals['cashBank'])) $rows['cashBank'] = $actuals['cashBank'];
             if ($key === 'inventory' && isset($actuals['inventory'])) $rows['inventory'] = $actuals['inventory'];
@@ -1849,6 +2619,17 @@ try {
     }
 
     if (($_GET['view'] ?? '') === 'sales_orders') {
+        $closing = mec_get_closing($pdo, $month);
+        $savedSteps = mec_fetch_rows($pdo, 'SELECT step_key, status, actual_json FROM month_end_closing_steps WHERE closing_id = ? AND step_key = ?', [(int)$closing['id'], 'sales']);
+        $savedSales = $savedSteps[0] ?? [];
+        $savedActual = json_decode((string)($savedSales['actual_json'] ?? ''), true);
+        if (strtoupper((string)($savedSales['status'] ?? '')) === 'LOCKED' && is_array($savedActual) && !empty($savedActual['sales_frozen'])) {
+            api_json([
+                'success' => true,
+                'frozen' => true,
+                'orders' => is_array($savedActual['sales_orders'] ?? null) ? $savedActual['sales_orders'] : [],
+            ]);
+        }
         $from = mec_month_start($month);
         $to = mec_month_end($month);
         $onlineActive = "COALESCE(o.is_cancelled, 0) = 0 AND COALESCE(o.is_returned, 0) = 0 AND LOWER(COALESCE(o.status, '')) NOT IN ('cancel', 'cancelled', 'canceled', 'return', 'returned', 'draft')";
@@ -1864,4 +2645,5 @@ try {
 } catch (Throwable $e) {
     error_log('month_end_closing API error: ' . $e->getMessage());
     api_error('Unable to process month-end closing.', 500);
+}
 }

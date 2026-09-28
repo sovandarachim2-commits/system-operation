@@ -52,7 +52,7 @@ function generate_order_code(PDO $pdo): string
     }
 
     $prefixDate = $useDate->format('Ymd');
-    $prefix = 'E-SHA-' . $prefixDate;
+    $prefix = 'MURU-' . $prefixDate;
 
     $stmt = $pdo->prepare("SELECT order_code FROM orders WHERE order_code LIKE ? ORDER BY id DESC LIMIT 1");
     $stmt->execute([$prefix . '%']);
