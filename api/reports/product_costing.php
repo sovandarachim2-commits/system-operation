@@ -30,6 +30,19 @@ function pc_request_range(): array
     return [$from, $to, $costMonth];
 }
 
+function pc_brand_ids(mixed $value): array
+{
+    $parts = is_array($value) ? $value : preg_split('/\s*,\s*/', trim((string)$value), -1, PREG_SPLIT_NO_EMPTY);
+    $ids = [];
+    foreach ($parts as $part) {
+        $id = filter_var($part, FILTER_VALIDATE_INT);
+        if ($id !== false && (int)$id > 0) {
+            $ids[] = (int)$id;
+        }
+    }
+    return array_values(array_unique($ids));
+}
+
 function pc_num(mixed $value): float
 {
     $number = (float)$value;
@@ -106,7 +119,7 @@ function pc_load(PDO $pdo): void
 
     [$from, $to, $month] = pc_request_range();
     $q = trim((string)($_GET['q'] ?? ''));
-    $brandId = filter_var($_GET['brand_id'] ?? null, FILTER_VALIDATE_INT);
+    $brandIds = pc_brand_ids($_GET['brand_ids'] ?? $_GET['brand_id'] ?? '');
 
     $brands = $pdo->query("
         SELECT id AS value, name AS label, color AS brand_color
@@ -133,11 +146,19 @@ function pc_load(PDO $pdo): void
                     ELSE 0
                 END
             ) AS line_discount,
+            (
+                CASE
+                    WHEN COALESCE(order_totals.order_line_total, 0) > 0
+                    THEN (oi.line_total / order_totals.order_line_total) * COALESCE(dc.amount, 0)
+                    ELSE 0
+                END
+            ) AS line_delivery,
             COALESCE(o.status, 'unpaid') AS payment_status,
             pj.printed_at
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         JOIN products p ON p.id = oi.product_id
+        LEFT JOIN delivery_costs dc ON dc.id = o.delivery_cost_id
         LEFT JOIN users u ON u.id = o.seller_id
         INNER JOIN (
             SELECT order_id, MAX(printed_at) AS printed_at
@@ -204,7 +225,7 @@ function pc_load(PDO $pdo): void
     }
 
     $soldByProduct = [];
-    $addSold = static function (array $source, float $qty, float $sales, float $discount, array $context = []) use (&$soldByProduct): void {
+    $addSold = static function (array $source, float $qty, float $sales, float $discount, float $delivery, array $context = []) use (&$soldByProduct): void {
         $pid = (int)($source['product_id'] ?? 0);
         if ($pid <= 0 || $qty <= 0) {
             return;
@@ -214,12 +235,14 @@ function pc_load(PDO $pdo): void
                 'sold_qty' => 0.0,
                 'sold_amount' => 0.0,
                 'discount_amount' => 0.0,
+                'delivery_amount' => 0.0,
                 'transactions' => [],
             ];
         }
         $soldByProduct[$pid]['sold_qty'] += $qty;
         $soldByProduct[$pid]['sold_amount'] += $sales;
         $soldByProduct[$pid]['discount_amount'] += $discount;
+        $soldByProduct[$pid]['delivery_amount'] += $delivery;
         $soldByProduct[$pid]['transactions'][] = [
             'order_id' => (int)($context['order_id'] ?? 0),
             'order_code' => (string)($context['order_code'] ?? ''),
@@ -232,7 +255,8 @@ function pc_load(PDO $pdo): void
             'qty' => $qty,
             'gross_sales' => $sales,
             'discount' => $discount,
-            'net_sales' => max(0, $sales - $discount),
+            'delivery' => $delivery,
+            'net_sales' => max(0, $sales - $discount + $delivery),
         ];
     };
 
@@ -243,6 +267,7 @@ function pc_load(PDO $pdo): void
         }
         $lineTotal = (float)($row['line_total'] ?? 0);
         $lineDiscount = (float)($row['line_discount'] ?? 0);
+        $lineDelivery = (float)($row['line_delivery'] ?? 0);
         $rawStatus = strtolower(trim((string)($row['payment_status'] ?? 'unpaid')));
         $paymentStatus = $rawStatus === 'paid' ? 'paid' : 'unpaid';
         $context = [
@@ -273,13 +298,13 @@ function pc_load(PDO $pdo): void
                     }
                     $weight = max($componentQty * (float)($component['unit_cost'] ?? 0), $componentQty);
                     $ratio = $weight / $weightTotal;
-                    $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $context);
+                    $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $lineDelivery * $ratio, $context);
                 }
                 continue;
             }
         }
 
-        $addSold($row, $qty, $lineTotal, $lineDiscount, $context);
+        $addSold($row, $qty, $lineTotal, $lineDiscount, $lineDelivery, $context);
     }
 
     $soldProductIds = array_keys($soldByProduct);
@@ -313,9 +338,9 @@ function pc_load(PDO $pdo): void
         $like = '%' . $q . '%';
         array_push($productParams, $like, $like, $like);
     }
-    if ($brandId !== false && $brandId !== null) {
-        $productWhere[] = 'p.brand_id = ?';
-        $productParams[] = (int)$brandId;
+    if ($brandIds) {
+        $productWhere[] = 'p.brand_id IN (' . implode(',', array_fill(0, count($brandIds), '?')) . ')';
+        array_push($productParams, ...$brandIds);
     }
     $productWhereSql = 'WHERE ' . implode(' AND ', $productWhere);
 
@@ -356,12 +381,13 @@ function pc_load(PDO $pdo): void
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     $rows = array_map(static function (array $row) use ($soldByProduct): array {
-        $sold = $soldByProduct[(int)$row['product_id']] ?? ['sold_qty' => 0, 'sold_amount' => 0, 'discount_amount' => 0];
+        $sold = $soldByProduct[(int)$row['product_id']] ?? ['sold_qty' => 0, 'sold_amount' => 0, 'discount_amount' => 0, 'delivery_amount' => 0];
         $unitCost = (float)$row['unit_cost'] + (float)$row['commission_amount'];
         $soldQty = (float)$sold['sold_qty'];
         $soldAmount = (float)$sold['sold_amount'];
         $discount = (float)$sold['discount_amount'];
-        $netSales = max(0, $soldAmount - $discount);
+        $delivery = (float)($sold['delivery_amount'] ?? 0);
+        $netSales = max(0, $soldAmount - $discount + $delivery);
         $row['sold_qty'] = $soldQty;
         $row['sold_amount'] = $soldAmount;
         $row['discount_amount'] = $discount;

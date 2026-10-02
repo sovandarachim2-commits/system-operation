@@ -758,6 +758,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             $pdo,
             "SELECT
                 'Dealer' AS source,
+                o.id AS order_id,
                 COALESCE(NULLIF(d.name, ''), NULLIF(o.dealer_name, ''), CONCAT('Dealer #', o.dealer_id)) AS customer,
                 o.order_code AS invoice,
                 DATE(o.order_date) AS invoice_date,
@@ -781,6 +782,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             $paid = (float)$row['paid'];
             $rows[] = [
                 'source' => 'Dealer',
+                'order_id' => (int)($row['order_id'] ?? 0),
                 'customer' => (string)$row['customer'],
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
@@ -805,6 +807,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             $pdo,
             "SELECT
                 'Offline' AS source,
+                o.id AS order_id,
                 COALESCE(NULLIF(o.customer_name, ''), 'Walk-in Customer') AS customer,
                 COALESCE(o.order_code, CONCAT('OFF-', o.id)) AS invoice,
                 DATE($offlineDateExpr) AS invoice_date,
@@ -826,6 +829,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             $paid = (float)$row['paid'];
             $rows[] = [
                 'source' => 'Offline',
+                'order_id' => (int)($row['order_id'] ?? 0),
                 'customer' => (string)$row['customer'],
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
@@ -851,6 +855,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             $pdo,
             "SELECT
                 'Online' AS source,
+                o.id AS order_id,
                 COALESCE(NULLIF(o.customer_name, ''), NULLIF(o.phone, ''), 'Online Customer') AS customer,
                 $onlineCode AS invoice,
                 DATE($onlineDateExpr) AS invoice_date,
@@ -879,6 +884,7 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
             $paid = (float)$row['paid'];
             $rows[] = [
                 'source' => 'Online',
+                'order_id' => (int)($row['order_id'] ?? 0),
                 'customer' => (string)$row['customer'],
                 'invoice' => (string)$row['invoice'],
                 'invoice_date' => (string)$row['invoice_date'],
@@ -1150,7 +1156,7 @@ function mec_delivery_by_join(PDO $pdo, string $codeExpr): array
             FROM out_items
             WHERE delivery_by IS NOT NULL AND TRIM(delivery_by) <> ''
             GROUP BY inv
-        ) ship ON ship.inv = $codeExpr",
+        ) ship ON ship.inv COLLATE utf8mb4_unicode_ci = ($codeExpr) COLLATE utf8mb4_unicode_ci",
         'COALESCE(ship.delivery_by, \'\')',
     ];
 }
@@ -1410,6 +1416,47 @@ function mec_cash_bank_rows(PDO $pdo, string $from, string $to): array
         return strcasecmp((string)$left['account'], (string)$right['account']);
     });
     return $rows;
+}
+
+function mec_offline_team_sales(PDO $pdo, string $from, string $to, string $offlineActive): array
+{
+    if (!api_table_exists($pdo, 'offline_sale_orders')) return [];
+    $amountCol = mec_pick($pdo, 'offline_sale_orders', ['total_amount', 'grand_total', 'amount']);
+    $dateParts = [];
+    foreach (['order_date', 'sale_date', 'created_at'] as $column) {
+        if (mec_has($pdo, 'offline_sale_orders', $column)) {
+            $dateParts[] = 'o.' . api_quote_identifier($column);
+        }
+    }
+    if (!$amountCol || !$dateParts) return [];
+    $dateExpr = count($dateParts) === 1 ? $dateParts[0] : 'COALESCE(' . implode(', ', $dateParts) . ')';
+    $amountExpr = 'o.' . api_quote_identifier($amountCol);
+    $join = '';
+    $teamExpr = "''";
+    if (mec_has($pdo, 'offline_sale_orders', 'team_id') && api_table_exists($pdo, 'offline_teams')) {
+        $join = 'LEFT JOIN offline_teams t ON t.id = o.team_id';
+        $teamExpr = "COALESCE(NULLIF(TRIM(t.name), ''), '')";
+    }
+    $active = str_replace('COALESCE(status,', 'COALESCE(o.status,', $offlineActive);
+    $rows = mec_fetch_rows(
+        $pdo,
+        "SELECT $teamExpr AS team, COUNT(*) AS orders, COALESCE(SUM($amountExpr), 0) AS amount
+         FROM offline_sale_orders o
+         $join
+         WHERE DATE($dateExpr) BETWEEN ? AND ? AND ($active)
+         GROUP BY team
+         ORDER BY team",
+        [$from, $to]
+    );
+    $teams = [];
+    foreach ($rows as $row) {
+        $teams[] = [
+            'team' => (string)($row['team'] ?? ''),
+            'orders' => (int)($row['orders'] ?? 0),
+            'amount' => (float)($row['amount'] ?? 0),
+        ];
+    }
+    return $teams;
 }
 
 function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = false, bool $includePreviousAp = false): array
@@ -1884,6 +1931,7 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
                 'dealer' => ['partial' => $dealerPartial, 'unpaid' => $dealerUnpaid],
             ],
             'orderDetails' => [],
+            'offlineTeams' => mec_offline_team_sales($pdo, $from, $to, $offlineActive),
             'sourcePerformance' => [
                 ['key' => 'online', 'label' => 'Online', 'orders' => $onlineOrderCount, 'amount' => $onlineSales],
                 ['key' => 'offline', 'label' => 'Offline', 'orders' => $offlineOrderCount, 'amount' => $offlineSales],

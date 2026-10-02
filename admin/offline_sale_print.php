@@ -8,6 +8,9 @@ require_once __DIR__ . '/../config.php';
 $pdo = get_db_connection();
 offline_ensure_schema($pdo);
 
+if (($_GET['embed'] ?? '') === '1') {
+    header_remove('X-Frame-Options');
+}
 $type       = in_array($_GET['type'] ?? '', ['receipt', 'invoice', 'delivery']) ? $_GET['type'] : 'receipt';
 $isInvoice  = $type === 'invoice';
 $isDelivery = $type === 'delivery';

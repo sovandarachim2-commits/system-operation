@@ -256,7 +256,7 @@ require_role_or_permission(['admin', 'cashier', 'scanner'], 'scanner_home.view')
     if (data.phone) {
       document.getElementById('phoneInput').value = data.phone;
     }
-    // Keep zero as a real amount; unpaid orders may legitimately have no amount due.
+    // Keep zero as a real amount; marketing takes and unpaid orders may have no amount due.
     if (data.amount !== undefined && data.amount !== null) {
       document.getElementById('amountInput').value = data.amount;
     }
