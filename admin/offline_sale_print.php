@@ -154,20 +154,32 @@ if ($loadedIds) {
     $ph = implode(',', array_fill(0, count($loadedIds), '?'));
 
     $iStmt = $pdo->prepare("
-        SELECT order_id, product_name, quantity, unit_price, line_total
-        FROM offline_sale_order_items
-        WHERE order_id IN ($ph)
-        ORDER BY order_id, id
+        SELECT i.order_id, i.product_name, i.quantity, i.unit_price, i.line_total
+        FROM offline_sale_order_items i
+        LEFT JOIN products p ON p.id = i.product_id
+        LEFT JOIN brands b ON b.id = p.brand_id
+        WHERE i.order_id IN ($ph)
+        ORDER BY i.order_id,
+                 CASE WHEN TRIM(COALESCE(b.name, '')) = '' THEN 1 ELSE 0 END,
+                 b.name,
+                 i.product_name,
+                 i.id
     ");
     $iStmt->execute($loadedIds);
     foreach ($iStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
         $itemsByOrder[(int)$row['order_id']][] = $row;
     }
     $pStmt = $pdo->prepare("
-        SELECT order_id, product_name, quantity, unit_price, line_total, item_condition, reason
-        FROM offline_sale_purchase_items
-        WHERE order_id IN ($ph)
-        ORDER BY order_id, id
+        SELECT i.order_id, i.product_name, i.quantity, i.unit_price, i.line_total, i.item_condition, i.reason
+        FROM offline_sale_purchase_items i
+        LEFT JOIN products p ON p.id = i.product_id
+        LEFT JOIN brands b ON b.id = p.brand_id
+        WHERE i.order_id IN ($ph)
+        ORDER BY i.order_id,
+                 CASE WHEN TRIM(COALESCE(b.name, '')) = '' THEN 1 ELSE 0 END,
+                 b.name,
+                 i.product_name,
+                 i.id
     ");
     $pStmt->execute($loadedIds);
     foreach ($pStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
@@ -298,80 +310,102 @@ function status_kh(string $s): string {
             display: flex; justify-content: space-between;
             font-size: 12px; color: #374151; margin-bottom: .15rem;
         }
-        .card-body, .receipt-card, .section-title,
-        .value-col, .label-col, .amount-col { text-align: left !important; }
-        .text-center, .justify-content-between,
-        .justify-content-center, .text-end { text-align: left !important; }
+        .receipt-card,
+        .receipt-card .card-body,
+        .receipt-card .section-title,
+        .receipt-card .value-col,
+        .receipt-card .label-col,
+        .receipt-card .amount-col,
+        .receipt-card .text-center,
+        .receipt-card .justify-content-between,
+        .receipt-card .justify-content-center,
+        .receipt-card .text-end { text-align: left !important; }
         .thermal-cut-feed { display: none; }
 
         /* ════════════════════════════════
-           INVOICE  — clean customer layout
+           INVOICE — customer document
            ════════════════════════════════ */
         .invoice-bundle { page-break-after: always; max-width: 820px; margin: 1.5rem auto; }
         .invoice-bundle:last-of-type { page-break-after: auto; }
-        .invoice-page { background: #fff; box-shadow: 0 4px 24px rgba(0,0,0,.13); overflow: hidden; }
-        .inv-accent { background: #1e3a5f; height: 7px; }
-        .inv-body   { padding: 26px 32px 30px; }
-
-        /* ── Invoice document style ── */
-        .invoice-page { padding:32px 40px; font-family:'Noto Sans Khmer',sans-serif; }
-        /* header */
-        .inv-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px; }
-        .inv-top-left { flex:0 0 42%; }
-        .inv-top-right { flex:0 0 55%; text-align:right; }
-        .inv-company-name { font-size:17px; font-weight:800; color:#111; margin-bottom:4px; }
-        .inv-company-info { font-size:13px; color:#111; line-height:1.75; }
-        .inv-title-kh { font-size:38px; font-weight:900; color:#111; line-height:1; font-family:'Noto Sans Khmer',sans-serif; }
-        .inv-title-en { font-size:13px; font-weight:700; color:#111; letter-spacing:3px; margin-bottom:12px; }
-        .inv-info-tbl { margin-left:auto; font-size:13px; border-collapse:collapse; }
-        .inv-info-tbl td { padding:2px 4px; color:#111; text-align:left; line-height:1.6; }
-        .inv-info-tbl td:first-child { font-weight:700; color:#111; white-space:nowrap; padding-right:10px; }
-        /* status stamp */
-        .inv-stamp-banner { text-align:center; margin:10px 0 16px; }
-        /* divider */
-        .inv-divider { border:none; border-top:1px solid #000; margin:0 0 16px; }
-        /* items table */
-        .inv-items { width:100%; border-collapse:collapse; }
-        .inv-items th {
-            background:#d1d5db; color:#000; padding:9px 12px;
-            text-align:center; font-size:12px; font-weight:700;
-            border:1px solid #000; font-family:'Noto Sans Khmer',sans-serif;
+        .invoice-page {
+            background: #fff;
+            box-shadow: 0 4px 24px rgba(0,0,0,.13);
+            overflow: hidden;
+            padding: 32px 40px;
+            color: #111;
+            font-family: "Khmer OS Battambang", "Battambang", "Noto Sans Khmer", Arial, sans-serif;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
         }
-        .inv-items th.tl { text-align:left; }
-        .inv-items td { padding:8px 12px; border:1px solid #000; font-size:13px; color:#111; }
-        .inv-items td.tr { text-align:right; }
-        .inv-items td.tc { text-align:center; }
-        .inv-items tbody tr:nth-child(even) { background:#f9fafb; }
-        /* summary table */
-        .inv-sum-wrap { display:flex; justify-content:flex-end; margin-top:0; }
-        .inv-sum { border-collapse:collapse; min-width:300px; font-size:13px; font-family:'Noto Sans Khmer',sans-serif; }
-        .inv-sum td { padding:7px 12px; border:1px solid #000; }
-        .inv-sum td:first-child { text-align:right; color:#111; font-weight:600; background:#f9fafb; white-space:nowrap; }
-        .inv-sum td:last-child  { text-align:right; font-weight:600; color:#111; min-width:110px; }
-        .inv-sum .sum-total td  { font-weight:800; font-size:14px; }
-        .inv-sum .sum-balance td:last-child { color:#991b1b; }
-        .inv-sum .sum-paid    td:last-child { color:#166534; }
-        /* payment history */
-        .inv-section-label { font-size:11px; font-weight:800; color:#111; margin:14px 0 6px; font-family:'Noto Sans Khmer',sans-serif; }
-        .inv-pay-table { width:100%; border-collapse:collapse; margin-bottom:10px; font-size:12px; }
-        .inv-pay-table th { background:#d1d5db; color:#000; padding:7px 10px; font-family:'Noto Sans Khmer',sans-serif; font-size:11px; }
-        .inv-pay-table th.tr { text-align:right; }
-        .inv-pay-table td { padding:6px 10px; border:1px solid #000; }
-        .inv-pay-table .tr { text-align:right; }
-        .inv-pay-table tfoot td { font-weight:700; background:#f9fafb; font-family:'Noto Sans Khmer',sans-serif; }
-        /* notes */
-        .inv-notes-area { min-height:44px; padding:8px 0 4px; font-size:13px; color:#111; font-family:'Noto Sans Khmer',sans-serif; }
-        /* signatures */
-        .inv-signatures { display:flex; justify-content:space-between; margin-top:36px; }
-        .inv-sig { font-size:15px; font-weight:800; color:#111; text-decoration:underline; font-family:'Noto Sans Khmer',sans-serif; }
-        /* QR footer */
-        .inv-footer { margin-top:16px; padding-top:12px; border-top:1px solid #000; display:flex; align-items:center; gap:16px; }
-        .inv-footer-qr img { width:90px; height:90px; border:1px solid #000; border-radius:4px; display:block; }
-        .inv-footer-text { font-size:11px; color:#111; }
-        .inv-footer-text a { color:#111; font-weight:600; word-break:break-all; }
-        .inv-generated { margin-top:12px; text-align:center; font-size:11px; color:#111; padding-top:8px; font-family:'Noto Sans Khmer',sans-serif; }
-        /* watermark */
-        .inv-watermark { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%) rotate(-25deg); font-size:100px; color:rgba(0,0,0,.04); z-index:-1; pointer-events:none; font-weight:900; font-family:'Noto Sans Khmer',sans-serif; }
+        .invoice-page .inv-accent { background: #1e3a5f; height: 7px; margin: -32px -40px 24px; }
+        .invoice-page .inv-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 18px; }
+        .invoice-page .inv-top-left { flex: 1; min-width: 0; }
+        .invoice-page .inv-top-right { flex: 0 0 46%; text-align: right; }
+        .invoice-page .inv-brand { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+        .invoice-page .invoice-logo { display: block; object-fit: contain; }
+        .invoice-page .inv-company-name { font-size: 17px; font-weight: 800; color: #111; margin-bottom: 4px; }
+        .invoice-page .inv-company-info { font-size: 13px; color: #111; line-height: 1.75; }
+        .invoice-page .inv-title-km { font-size: 22px; font-weight: 800; color: #111; line-height: 1.25; }
+        .invoice-page .inv-title-en { font-size: 13px; font-weight: 700; color: #111; letter-spacing: 1.5px; margin: 2px 0 10px; }
+        .invoice-page .inv-info-tbl { margin-left: auto; font-size: 13px; border-collapse: collapse; }
+        .invoice-page .inv-info-tbl td { padding: 5px 8px; color: #111; text-align: left; line-height: 1.35; vertical-align: top; border: 0; }
+        .invoice-page .inv-info-tbl td:first-child { font-weight: 700; white-space: nowrap; }
+        .invoice-page .inv-info-tbl td:last-child { font-weight: 600; overflow-wrap: anywhere; }
+        .invoice-page .inv-info-tbl tr:nth-child(odd) td { background: #e8eef5; }
+        .invoice-page .inv-info-tbl tr:nth-child(even) td { background: #f8fafc; }
+        .invoice-page .lbl-km,
+        .invoice-page .lbl-en { display: inline; font-size: inherit; font-weight: inherit; color: inherit; }
+        .invoice-page .lbl-en::before { content: " / "; }
+        .invoice-page .inv-divider { border: none; border-top: 1px solid #000; margin: 16px 0; }
+        .invoice-page .inv-items,
+        .invoice-page .inv-pay-table { width: 100%; border-collapse: collapse; }
+        .invoice-page .inv-items th,
+        .invoice-page .inv-pay-table th {
+            background: #1e3a5f;
+            color: #fff;
+            padding: 9px 12px;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 700;
+            border: 1px solid #16304d;
+        }
+        .invoice-page .inv-items th .th-en { display: block; font-size: 10px; font-weight: 600; letter-spacing: .3px; color: inherit; }
+        .invoice-page .inv-pay-table th .th-en { display: inline; font-size: inherit; font-weight: inherit; letter-spacing: 0; color: inherit; }
+        .invoice-page .inv-pay-table th .th-en::before { content: " / "; }
+        .invoice-page .inv-items th.tl { text-align: left; }
+        .invoice-page .inv-items td,
+        .invoice-page .inv-pay-table td { padding: 8px 12px; border: 1px solid #000; font-size: 13px; color: #111; }
+        .invoice-page .tc { text-align: center; }
+        .invoice-page .tr { text-align: right; }
+        .invoice-page .inv-items tbody tr:nth-child(even),
+        .invoice-page .inv-pay-table tbody tr:nth-child(even) { background: #f3f6fa; }
+        .invoice-page .line-note { margin-top: 2px; font-size: 11px; font-weight: 600; color: #111; }
+        .invoice-page .inv-sum-wrap { display: flex; justify-content: flex-end; margin-top: 0; }
+        .invoice-page .inv-sum { border-collapse: collapse; min-width: 280px; font-size: 13px; }
+        .invoice-page .inv-sum td { padding: 7px 12px; border: 1px solid #000; color: #111; }
+        .invoice-page .inv-sum td:first-child { text-align: right; font-weight: 700; background: #e8eef5; white-space: nowrap; }
+        .invoice-page .inv-sum tr:nth-child(even) td:first-child { background: #f8fafc; }
+        .invoice-page .inv-sum td:last-child { text-align: right; font-weight: 700; min-width: 120px; }
+        .invoice-page .inv-sum tr.sum-total td { background: #1e3a5f; color: #fff; font-weight: 800; }
+        .invoice-page .inv-sum tr.sum-total .lbl-en,
+        .invoice-page .inv-sum tr.sum-total .khr { color: #fff; background: transparent; }
+        .invoice-page .inv-sum .khr { display: block; margin-top: 2px; font-size: 12px; font-weight: 700; }
+        .invoice-page .inv-rate { margin-top: 6px; text-align: right; font-size: 11px; font-weight: 600; color: #111; }
+        .invoice-page .inv-section-label { font-size: 13px; font-weight: 800; color: #111; margin: 16px 0 8px; }
+        .invoice-page .inv-pay-table th { padding: 7px 10px; }
+        .invoice-page .inv-pay-table td { padding: 6px 10px; font-size: 12px; }
+        .invoice-page .inv-pay-table tfoot td { font-weight: 800; background: #e8eef5; }
+        .invoice-page .inv-notes { min-height: 28px; padding: 10px 0 4px; font-size: 13px; color: #111; }
+        .invoice-page .inv-footer { margin-top: 16px; padding-top: 12px; border-top: 1px solid #000; display: flex; align-items: center; gap: 16px; }
+        .invoice-page .inv-footer-qr img { width: 84px; height: 84px; border: 1px solid #000; display: block; }
+        .invoice-page .inv-footer-text { font-size: 12px; color: #111; line-height: 1.5; }
+        .invoice-page .inv-footer-text a { color: #111; font-weight: 700; word-break: break-all; }
+        .invoice-page .inv-signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-top: 48px; padding: 0 24px; }
+        .invoice-page .inv-sig { text-align: center; font-size: 14px; font-weight: 800; color: #111; }
+        .invoice-page .inv-sig .sig-en { display: inline; font-size: inherit; font-weight: inherit; }
+        .invoice-page .sig-en::before { content: " / "; }
+        .invoice-page .inv-sig-line { border-top: 1px solid #111; margin-top: 56px; }
+        .invoice-page .inv-generated { margin-top: 16px; text-align: center; font-size: 11px; color: #111; padding-top: 8px; }
 
         /* ════════════════════════════════
            DELIVERY SLIP
@@ -492,52 +526,15 @@ function status_kh(string $s): string {
         }
 
         <?php if ($isInvoice): ?>
-        /* ── A5 invoice — single page ── */
+        /* Leave page size, margins, and scale to Chrome's print dialog. */
         @media print {
-            @page { margin: 6mm 8mm; }
-            body, html { margin:0; padding:0; }
-            .invoice-bundle { max-width:100%; margin:0; page-break-after:always; break-after:page; page-break-inside:avoid; break-inside:avoid; }
-            .invoice-bundle:last-of-type { page-break-after:auto; break-after:auto; }
-            .invoice-page   { padding:8px 12px !important; box-shadow:none !important; }
-            /* header */
-            .inv-top        { margin-bottom:6px !important; }
-            .inv-top-left   { flex:0 0 40% !important; }
-            .inv-top-right  { flex:0 0 57% !important; }
-            .inv-company-name { font-size:11px !important; margin-top:3px !important; }
-            .inv-company-info { font-size:9px !important; line-height:1.5 !important; }
-            .inv-title-kh   { font-size:22px !important; }
-            .inv-title-en   { font-size:9px !important; margin-bottom:4px !important; }
-            .inv-info-tbl   { font-size:9px !important; }
-            .inv-info-tbl td { padding:1px 3px !important; }
-            .invoice-logo   { max-height:60px !important; max-width:90px !important; }
-            /* stamp */
-            .inv-stamp-banner { margin:4px 0 6px !important; padding:4px 0 !important; }
-            .inv-stamp      { font-size:16px !important; padding:3px 12px !important; border-width:2px !important; }
-            /* divider */
-            .inv-divider    { margin:4px 0 6px !important; }
-            /* items */
-            .inv-items th   { padding:4px 5px !important; font-size:8px !important; }
-            .inv-items th span { font-size:7px !important; }
-            .inv-items td   { padding:4px 5px !important; font-size:9px !important; }
-            /* summary */
-            .inv-sum-wrap   { margin-top:0 !important; }
-            .inv-sum td     { padding:4px 7px !important; font-size:9px !important; }
-            .inv-sum .sum-total td { font-size:10px !important; }
-            /* payment history */
-            .inv-section-label { margin:6px 0 4px !important; font-size:8px !important; }
-            .inv-pay-table th  { padding:3px 6px !important; font-size:7px !important; }
-            .inv-pay-table td  { padding:3px 6px !important; font-size:8px !important; }
-            /* notes */
-            .inv-notes-area { min-height:20px !important; padding:4px 0 !important; font-size:9px !important; }
-            /* signatures */
-            .inv-signatures { margin-top:14px !important; }
-            .inv-sig        { font-size:11px !important; }
-            /* footer */
-            .inv-footer     { margin-top:8px !important; padding-top:6px !important; gap:10px !important; }
-            .inv-footer-qr img { width:52px !important; height:52px !important; }
-            .inv-footer-text { font-size:8px !important; }
-            .inv-generated  { font-size:8px !important; margin-top:6px !important; padding-top:5px !important; }
-            .inv-watermark  { font-size:55px; }
+            .container-fluid { padding: 0 !important; }
+            .invoice-bundle { max-width: none; margin: 0; }
+            .invoice-page { padding: 8px 12px !important; box-shadow: none !important; }
+            .invoice-page .inv-accent { margin: -8px -12px 12px; }
+            .invoice-page .inv-title-km { font-size: 18px; }
+            .invoice-page .inv-signatures { margin-top: 36px; }
+            .invoice-page .inv-sig-line { margin-top: 42px; }
         }
         <?php endif; ?>
     </style>
@@ -834,73 +831,62 @@ function status_kh(string $s): string {
     </div>
     </div><!-- /.bulk-receipt-bundle -->
 
-    <?php /* ════════════ INVOICE ════════════ */ elseif ($isInvoice):
-        $invStampClass = match($order['status']) {
-            'paid'    => 'inv-stamp-paid',
-            'partial' => 'inv-stamp-partial',
-            default   => 'inv-stamp-unpaid',
-        };
-        $dueCardClass = $balanceDue > 0 ? 'inv-card-due' : 'inv-card-zero';
-    ?>
+    <?php /* ════════════ INVOICE ════════════ */ elseif ($isInvoice): ?>
     <div class="invoice-bundle">
     <div class="invoice-page">
-        <div class="inv-watermark"><?= status_kh($order['status']) ?></div>
         <div class="inv-accent"></div>
-        <div class="inv-body">
-
-        <!-- ① TOP: Company LEFT | Title + Customer RIGHT -->
         <div class="inv-top">
-            <!-- LEFT: company -->
             <div class="inv-top-left">
-                <?= make_logo_html($BASE_URL, $invoiceLogo, $logoStyle, 'invoice-logo') ?>
-                <div class="inv-company-name" style="margin-top:6px;"><?= htmlspecialchars($companyName) ?></div>
-                <div class="inv-company-info">
-                    <?php if ($contactPerson):  ?><div><?= htmlspecialchars($contactPerson) ?></div><?php endif; ?>
-                    <?php if ($companyPhone):   ?><div>លេខទូរស័ព្ទ: <?= htmlspecialchars($companyPhone) ?></div><?php endif; ?>
-                    <?php if ($companyAddress): ?><div>អាសយដ្ឋាន: <?= htmlspecialchars($companyAddress) ?></div><?php endif; ?>
-                    <?php if (!empty($order['team_name'])): ?><div>ក្រុម: <?= htmlspecialchars($order['team_name']) ?></div><?php endif; ?>
+                <div class="inv-brand">
+                    <?= make_logo_html($BASE_URL, $invoiceLogo, $logoStyle, 'invoice-logo') ?>
+                    <div class="inv-company">
+                        <div class="inv-company-name"><?= htmlspecialchars($companyName) ?></div>
+                        <div class="inv-company-info">
+                            <?php if ($contactPerson): ?><div>ទំនាក់ទំនង / Contact: <?= htmlspecialchars($contactPerson) ?></div><?php endif; ?>
+                            <?php if ($companyAddress): ?><div><?= nl2br(htmlspecialchars($companyAddress)) ?></div><?php endif; ?>
+                            <?php if ($companyPhone): ?><div>ទូរស័ព្ទ / Phone: <?= htmlspecialchars($companyPhone) ?></div><?php endif; ?>
+                            <?php if ($companyEmail): ?><div>អ៊ីមែល / Email: <?= htmlspecialchars($companyEmail) ?></div><?php endif; ?>
+                        </div>
+                    </div>
                 </div>
             </div>
-            <!-- RIGHT: title + order/customer info -->
             <div class="inv-top-right">
-                <div class="inv-title-kh">វិក្កយបត្រ</div>
-                <div class="inv-title-en">INVOICE</div>
+                <div class="inv-title-km">វិក្កយបត្រលក់</div>
+                <div class="inv-title-en">OFFLINE SALE INVOICE</div>
                 <table class="inv-info-tbl">
-                    <tr><td>លេខវិក្កយបត្រ:</td><td><?= htmlspecialchars($order['order_code']) ?></td></tr>
-                    <tr><td>កាលបរិច្ឆេទ:</td><td><?= htmlspecialchars(fd($order['sale_date'] ?? null)) ?></td></tr>
-                    <tr><td>ឈ្មោះអតិថិជន:</td><td><?= htmlspecialchars($order['customer_name'] ?: '—') ?></td></tr>
-                    <tr><td>លេខទូរស័ព្ទ:</td><td><?= htmlspecialchars($order['phone'] ?: '—') ?></td></tr>
-                    <tr><td>អាសយដ្ឋាន:</td><td><?= htmlspecialchars($order['customer_location'] ?: '—') ?></td></tr>
+                    <tr><td><span class="lbl-km">លេខវិក្កយបត្រ</span><span class="lbl-en">Invoice No</span></td><td><?= htmlspecialchars($order['order_code']) ?></td></tr>
+                    <tr><td><span class="lbl-km">កាលបរិច្ឆេទ</span><span class="lbl-en">Date</span></td><td><?= htmlspecialchars(fd($order['sale_date'] ?? null)) ?></td></tr>
+                    <tr><td><span class="lbl-km">អតិថិជន</span><span class="lbl-en">Customer</span></td><td><?= htmlspecialchars($order['customer_name'] ?: '—') ?></td></tr>
+                    <tr><td><span class="lbl-km">ទូរស័ព្ទ</span><span class="lbl-en">Phone</span></td><td><?= htmlspecialchars($order['phone'] ?: '—') ?></td></tr>
+                    <tr><td><span class="lbl-km">អាសយដ្ឋាន</span><span class="lbl-en">Address</span></td><td><?= htmlspecialchars($order['customer_location'] ?: '—') ?></td></tr>
+                    <?php if (!empty($order['team_name'])): ?>
+                    <tr><td><span class="lbl-km">ក្រុម</span><span class="lbl-en">Team</span></td><td><?= htmlspecialchars($order['team_name']) ?></td></tr>
+                    <?php endif; ?>
+                    <tr><td><span class="lbl-km">ស្ថានភាព</span><span class="lbl-en">Status</span></td><td><?= htmlspecialchars(status_kh($order['status'])) ?></td></tr>
                     <?php if (!empty($order['payment_method'])): ?>
-                    <tr><td>វិធីទូទាត់:</td><td><?= htmlspecialchars($order['payment_method']) ?></td></tr>
+                    <tr><td><span class="lbl-km">វិធីទូទាត់</span><span class="lbl-en">Payment</span></td><td><?= htmlspecialchars($order['payment_method']) ?></td></tr>
                     <?php endif; ?>
                 </table>
             </div>
         </div>
 
-        <!-- ② Status stamp -->
-        <div class="inv-stamp-banner">
-            <span class="inv-stamp <?= $invStampClass ?>"><?= status_kh($order['status']) ?></span>
-        </div>
-
         <hr class="inv-divider">
 
-        <!-- ③ Items table -->
         <table class="inv-items">
             <thead>
                 <tr>
-                    <th class="tl" style="width:5%;">No</th>
-                    <th class="tl" style="width:42%;">បរិយាយ<br><span style="font-weight:400;font-size:10px;">Description</span></th>
-                    <th style="width:13%;">បរិមាណ<br><span style="font-weight:400;font-size:10px;">Quantity</span></th>
-                    <th style="width:18%;">តម្លៃ<br><span style="font-weight:400;font-size:10px;">Price</span></th>
-                    <th style="width:18%;">សរុប<br><span style="font-weight:400;font-size:10px;">Total</span></th>
+                    <th class="tl" style="width:7%;">ល.រ<span class="th-en">No</span></th>
+                    <th class="tl">ផលិតផល<span class="th-en">Product</span></th>
+                    <th style="width:12%;">ចំនួន<span class="th-en">Qty</span></th>
+                    <th style="width:16%;">តម្លៃ<span class="th-en">Price</span></th>
+                    <th style="width:16%;">សរុប<span class="th-en">Total</span></th>
                 </tr>
             </thead>
             <tbody>
                 <?php $rowNum = 1; foreach ($items as $item): ?>
                 <tr>
-                    <td class="tc" style="color:#111;font-size:11px;"><?= $rowNum++ ?></td>
-                    <td><strong>SALE:</strong> <?= htmlspecialchars($item['product_name']) ?></td>
+                    <td class="tc"><?= $rowNum++ ?></td>
+                    <td><strong><?= htmlspecialchars($item['product_name']) ?></strong></td>
                     <td class="tc"><?= fq((float)$item['quantity']) ?></td>
                     <td class="tr">$<?= number_format((float)$item['unit_price'], 2) ?></td>
                     <td class="tr">$<?= number_format((float)$item['line_total'], 2) ?></td>
@@ -908,51 +894,73 @@ function status_kh(string $s): string {
                 <?php endforeach; ?>
                 <?php foreach ($purchaseItems as $item): ?>
                 <tr>
-                    <td class="tc" style="color:#111;font-size:11px;"><?= $rowNum++ ?></td>
-                    <td><strong>PURCHASE:</strong> <?= htmlspecialchars($item['product_name']) ?></td>
+                    <td class="tc"><?= $rowNum++ ?></td>
+                    <td>
+                        <strong><?= htmlspecialchars($item['product_name']) ?></strong>
+                        <div class="line-note">ទិញពីអតិថិជន / Purchase from customer</div>
+                    </td>
                     <td class="tc"><?= fq((float)$item['quantity']) ?></td>
                     <td class="tr">-$<?= number_format((float)$item['unit_price'], 2) ?></td>
                     <td class="tr">-$<?= number_format((float)$item['line_total'], 2) ?></td>
                 </tr>
                 <?php endforeach; ?>
                 <?php if (!$items && !$purchaseItems): ?>
-                <tr><td colspan="5" class="tc" style="color:#111;">គ្មានផលិតផល</td></tr>
+                <tr><td colspan="5" class="tc">គ្មានផលិតផល / No products</td></tr>
                 <?php endif; ?>
             </tbody>
         </table>
 
-        <!-- ④ Summary (right-aligned) -->
         <div class="inv-sum-wrap">
             <table class="inv-sum">
-                <tr><td>សរុប / TOTAL</td>
-                    <td>៛<?= number_format($totalAmount * $exchangeRate, 0) ?><br>$<?= number_format($totalAmount, 2) ?></td>
+                <?php if ($discount > 0 || $purchaseTotal > 0): ?>
+                <tr>
+                    <td>សរុបរង<span class="lbl-en">Subtotal</span></td>
+                    <td>$<?= number_format($subtotal, 2) ?></td>
                 </tr>
-                <?php if ($discount > 0): ?>
-                <tr><td>បញ្ចុះតម្លៃ / Discount</td><td>-$<?= number_format($discount, 2) ?></td></tr>
-                <?php else: ?>
-                <tr><td>បញ្ចុះតម្លៃ / Discount</td><td>--</td></tr>
                 <?php endif; ?>
-                <tr class="sum-paid"><td>ប្រាក់ទទួល / Received</td><td>$<?= number_format($totalPaid, 2) ?></td></tr>
-                <tr class="sum-balance <?= $balanceDue > 0 ? 'sum-balance' : 'sum-paid' ?>">
-                    <td>ប្រាក់នៅខ្វះ / Balance</td>
-                    <td>៛<?= number_format($balanceDue * $exchangeRate, 0) ?><br>$<?= number_format($balanceDue, 2) ?></td>
+                <?php if ($discount > 0): ?>
+                <tr>
+                    <td>បញ្ចុះតម្លៃ<span class="lbl-en">Discount</span></td>
+                    <td>-$<?= number_format($discount, 2) ?></td>
                 </tr>
-                <tr><td colspan="2" style="font-size:10px;color:#111;text-align:right;background:#f9fafb;border:1px solid #000;">
-                    អត្រាប្តូរប្រាក់: 1 USD = <?= number_format($exchangeRate, 0) ?>រៀល
-                </td></tr>
+                <?php endif; ?>
+                <?php if ($purchaseTotal > 0): ?>
+                <tr>
+                    <td>ទិញពីអតិថិជន<span class="lbl-en">Purchase</span></td>
+                    <td>-$<?= number_format($purchaseTotal, 2) ?></td>
+                </tr>
+                <?php endif; ?>
+                <tr class="sum-total">
+                    <td>សរុបចុងក្រោយ<span class="lbl-en">Grand Total</span></td>
+                    <td>
+                        $<?= number_format($totalAmount, 2) ?>
+                        <span class="khr">៛<?= number_format($totalAmount * $exchangeRate, 0) ?></span>
+                    </td>
+                </tr>
+                <tr>
+                    <td>បានទទួល<span class="lbl-en">Received</span></td>
+                    <td>$<?= number_format($totalPaid, 2) ?></td>
+                </tr>
+                <tr>
+                    <td>នៅសល់<span class="lbl-en">Balance</span></td>
+                    <td>
+                        $<?= number_format($balanceDue, 2) ?>
+                        <span class="khr">៛<?= number_format($balanceDue * $exchangeRate, 0) ?></span>
+                    </td>
+                </tr>
             </table>
         </div>
+        <div class="inv-rate">អត្រាប្តូរប្រាក់ / Exchange rate: 1 USD = <?= number_format($exchangeRate, 0) ?> រៀល</div>
 
-        <!-- ⑤ Payment history -->
         <?php if ($payments): ?>
-        <div class="inv-section-label">ប្រវត្តិការទូទាត់</div>
+        <div class="inv-section-label">ប្រវត្តិទូទាត់<span class="lbl-en">Payment History</span></div>
         <table class="inv-pay-table">
             <thead>
                 <tr>
-                    <th>កាលបរិច្ឆេទ</th>
-                    <th>វិធីទូទាត់</th>
-                    <th>កំណត់ចំណាំ</th>
-                    <th class="tr">ចំនួនទឹកប្រាក់</th>
+                    <th>កាលបរិច្ឆេទ<span class="th-en">Date</span></th>
+                    <th>វិធីសាស្ត្រ<span class="th-en">Method</span></th>
+                    <th>កំណត់សម្គាល់<span class="th-en">Note</span></th>
+                    <th class="tr">ចំនួនទឹកប្រាក់<span class="th-en">Amount</span></th>
                 </tr>
             </thead>
             <tbody>
@@ -960,55 +968,47 @@ function status_kh(string $s): string {
                 <tr>
                     <td><?= htmlspecialchars(fd($p['payment_date'])) ?></td>
                     <td><?= htmlspecialchars($p['payment_method'] ?? '—') ?></td>
-                    <td style="color:#111;"><?= htmlspecialchars($p['paid_note'] ?? '—') ?></td>
-                    <td class="tr" style="color:#166534;font-weight:700;">$<?= number_format((float)$p['amount'], 2) ?></td>
+                    <td><?= htmlspecialchars($p['paid_note'] ?? '—') ?></td>
+                    <td class="tr">$<?= number_format((float)$p['amount'], 2) ?></td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>
             <tfoot>
                 <tr>
-                    <td colspan="3" style="text-align:right;">បានបង់សរុប</td>
+                    <td colspan="3" class="tr">សរុបបានបង់ / Total Paid</td>
                     <td class="tr">$<?= number_format($totalPaid, 2) ?></td>
                 </tr>
             </tfoot>
         </table>
         <?php endif; ?>
 
-        <!-- ⑥ Notes -->
-        <div class="inv-notes-area">
-            <?php if (!empty($order['paid_note'])): ?>
-                * <?= nl2br(htmlspecialchars($order['paid_note'])) ?>
-            <?php else: ?>
-                * *
-            <?php endif; ?>
-        </div>
+        <?php if (!empty($order['paid_note'])): ?>
+        <div class="inv-notes">* <?= nl2br(htmlspecialchars($order['paid_note'])) ?></div>
+        <?php endif; ?>
 
-        <!-- ⑦ QR footer -->
         <?php if ($paymentUrl !== ''): ?>
         <div class="inv-footer">
             <div class="inv-footer-qr">
                 <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=<?= urlencode($paymentUrl) ?>" alt="QR">
             </div>
             <div class="inv-footer-text">
-                <strong>សម្រាប់ការទូទាត់អនឡាញ ស្កែន QR ឬចូលទៅ:</strong><br>
+                <strong>សម្រាប់ការទូទាត់អនឡាញ ស្កែន QR</strong>
+                <span class="lbl-en">Scan to pay online</span>
                 <a href="<?= htmlspecialchars($paymentUrl) ?>"><?= htmlspecialchars($paymentUrl) ?></a>
             </div>
         </div>
         <?php endif; ?>
 
-        <!-- ⑧ Signatures -->
         <div class="inv-signatures">
-            <div class="inv-sig">អ្នកលក់/Seller</div>
-            <div class="inv-sig">អ្នកទិញ/Buyer</div>
+            <div class="inv-sig">អ្នកលក់<span class="sig-en">Seller</span><div class="inv-sig-line"></div></div>
+            <div class="inv-sig">អ្នកទិញ<span class="sig-en">Buyer</span><div class="inv-sig-line"></div></div>
         </div>
 
         <div class="inv-generated">
-            បង្កើតនៅ <?= date('d/m/Y H:i') ?> &mdash; សូមអរគុណសម្រាប់ការជ្រើសរើសសេវាកម្ម!
+            បង្កើតនៅ <?= date('d/m/Y H:i') ?> / Generated <?= date('d/m/Y H:i') ?> — សូមអរគុណ! / Thank you!
         </div>
-
-        </div><!-- /.inv-body -->
-    </div><!-- /.invoice-page -->
-    </div><!-- /.invoice-bundle -->
+    </div>
+    </div>
     <?php endif; ?>
 
     <?php endforeach; ?>

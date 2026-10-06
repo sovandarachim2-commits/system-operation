@@ -1071,6 +1071,120 @@ function offline_order_update_change_summary(array $oldRows, array $items, float
 }
 
 /**
+ * @param array<int|string, array<string, mixed>> $rows
+ * @return array<string, array{product_id:int,name:string,quantity:float,unit_price:float,sku:?string}>
+ */
+function offline_purchase_stock_groups(array $rows): array
+{
+    $groups = [];
+    foreach ($rows as $row) {
+        $pid = (int)($row['product_id'] ?? $row['id'] ?? 0);
+        $name = trim((string)($row['product_name'] ?? $row['name'] ?? ''));
+        $qty = (float)($row['quantity'] ?? 0);
+        if ($qty <= 0 || ($pid <= 0 && $name === '')) {
+            continue;
+        }
+        $key = $pid > 0 ? 'id:' . $pid : 'name:' . (function_exists('mb_strtolower') ? mb_strtolower($name, 'UTF-8') : strtolower($name));
+        if (!isset($groups[$key])) {
+            $groups[$key] = [
+                'product_id' => $pid,
+                'name' => $name,
+                'quantity' => 0.0,
+                'unit_price' => (float)($row['unit_price'] ?? $row['purchase_price'] ?? 0),
+                'sku' => isset($row['sku']) ? (string)$row['sku'] : null,
+            ];
+        }
+        $groups[$key]['quantity'] += $qty;
+        if ($name !== '') {
+            $groups[$key]['name'] = $name;
+        }
+        $price = (float)($row['unit_price'] ?? $row['purchase_price'] ?? 0);
+        if ($price > 0) {
+            $groups[$key]['unit_price'] = $price;
+        }
+        if (!empty($row['sku'])) {
+            $groups[$key]['sku'] = (string)$row['sku'];
+        }
+    }
+    return $groups;
+}
+
+function offline_move_purchased_stock(PDO $pdo, int $locationId, array $group, float $delta, string $orderCode, string $userLabel): void
+{
+    if ($locationId <= 0 || abs($delta) < 0.0001) {
+        return;
+    }
+    $name = (string)($group['name'] ?? '');
+    $pid = (int)($group['product_id'] ?? 0);
+    $inv = $name !== '' ? offline_inventory_row($pdo, $locationId, $name) : null;
+    $prev = $inv ? (float)$inv['quantity_on_hand'] : 0.0;
+    if ($delta < 0 && (!$inv || $prev + 0.009 < abs($delta))) {
+        throw new RuntimeException('Cannot edit because purchased stock for ' . $name . ' is no longer available.');
+    }
+    $newQty = $prev + $delta;
+    $price = (float)($group['unit_price'] ?? 0);
+    $sku = $inv['sku'] ?? ($group['sku'] ?? null);
+    if ($delta > 0) {
+        $oldCost = $inv ? (float)($inv['unit_cost'] ?? 0) : 0.0;
+        $unitCost = $newQty > 0 ? (($prev * $oldCost) + ($delta * $price)) / $newQty : $price;
+    } else {
+        $unitCost = (float)($inv['unit_cost'] ?? $price);
+    }
+    offline_save_inventory($pdo, $locationId, $name, $newQty, $unitCost, $sku, $inv ? (int)$inv['id'] : null);
+    if ($inv) {
+        offline_cleanup_inventory_duplicates($pdo, (int)$inv['id'], (array)($inv['duplicate_ids'] ?? []));
+    }
+    if ($pid > 0) {
+        $inbound = $delta > 0;
+        offline_insert_stock_movement(
+            $pdo,
+            $pid,
+            $inbound ? 'in' : 'out',
+            abs($delta),
+            $prev,
+            $newQty,
+            $inbound ? 'offline_customer_purchase' : 'offline_purchase_edit',
+            $orderCode,
+            ($inbound ? 'Purchased from customer ' : 'Customer purchase edit reversal ') . $orderCode . ' [Location:' . $locationId . ']',
+            $price,
+            $userLabel,
+            $inbound ? null : $locationId,
+            $inbound ? $locationId : null
+        );
+    }
+}
+
+/**
+ * Move purchased stock only by the quantity that changed.
+ * An unchanged customer purchase stays in inventory, so the sale lines can still be edited
+ * after that purchased stock has already been sold or transferred.
+ *
+ * @param array<int|string, array<string, mixed>> $oldRows
+ * @param array<int|string, array<string, mixed>> $newItems
+ */
+function offline_sync_purchase_stock_edit(PDO $pdo, int $oldLocationId, int $newLocationId, array $oldRows, array $newItems, string $orderCode, string $userLabel): void
+{
+    $oldGroups = offline_purchase_stock_groups($oldRows);
+    $newGroups = offline_purchase_stock_groups($newItems);
+    $sameLocation = $oldLocationId > 0 && $oldLocationId === $newLocationId;
+    if ($sameLocation) {
+        foreach (array_unique(array_merge(array_keys($oldGroups), array_keys($newGroups))) as $key) {
+            $oldQty = (float)($oldGroups[$key]['quantity'] ?? 0);
+            $newQty = (float)($newGroups[$key]['quantity'] ?? 0);
+            $group = $newGroups[$key] ?? $oldGroups[$key];
+            offline_move_purchased_stock($pdo, $newLocationId, $group, $newQty - $oldQty, $orderCode, $userLabel);
+        }
+        return;
+    }
+    foreach ($oldGroups as $group) {
+        offline_move_purchased_stock($pdo, $oldLocationId, $group, -1 * (float)$group['quantity'], $orderCode, $userLabel);
+    }
+    foreach ($newGroups as $group) {
+        offline_move_purchased_stock($pdo, $newLocationId, $group, (float)$group['quantity'], $orderCode, $userLabel);
+    }
+}
+
+/**
  * @param array<array-key, array<string, mixed>> $items Sale lines with product id, quantity, and selling_price.
  */
 function offline_update_sale_order(
@@ -1199,25 +1313,6 @@ function offline_update_sale_order(
             }
         }
 
-        foreach ($oldPurchaseRows as $row) {
-            $pid = (int)($row['product_id'] ?? 0);
-            $qty = (float)($row['quantity'] ?? 0);
-            if ($pid <= 0 || $qty <= 0 || $oldLocationId <= 0) {
-                continue;
-            }
-            $name = (string)$row['product_name'];
-            $inv = offline_inventory_row($pdo, $oldLocationId, $name);
-            $prev = $inv ? (float)$inv['quantity_on_hand'] : 0.0;
-            if (!$inv || $prev + 0.009 < $qty) {
-                throw new RuntimeException('Cannot edit because purchased stock for ' . $name . ' is no longer available.');
-            }
-            $new = $prev - $qty;
-            $unitCost = (float)($row['unit_price'] ?? ($inv['unit_cost'] ?? 0));
-            offline_save_inventory($pdo, $oldLocationId, $name, $new, (float)($inv['unit_cost'] ?? $unitCost), $inv['sku'] ?? null, (int)$inv['id']);
-            offline_cleanup_inventory_duplicates($pdo, (int)$inv['id'], (array)($inv['duplicate_ids'] ?? []));
-            offline_insert_stock_movement($pdo, $pid, 'out', $qty, $prev, $new, 'offline_purchase_edit', $orderCode, 'Customer purchase edit reversal ' . $orderCode . ' [Location:' . $oldLocationId . ']', $unitCost, $userLabel, $oldLocationId, null);
-        }
-
         $pdo->prepare("DELETE FROM offline_sale_order_items WHERE order_id = ?")->execute([$orderId]);
         $pdo->prepare("DELETE FROM offline_sale_purchase_items WHERE order_id = ?")->execute([$orderId]);
 
@@ -1266,19 +1361,10 @@ function offline_update_sale_order(
             $qty = (float)$item['quantity'];
             $price = (float)$item['purchase_price'];
             $name = (string)$item['name'];
-            $inv = offline_inventory_row($pdo, $locationId, $name);
-            $prev = $inv ? (float)$inv['quantity_on_hand'] : 0.0;
-            $new = $prev + $qty;
-            $sku = $inv['sku'] ?? ($item['sku'] ?? null);
-            $oldCost = $inv ? (float)($inv['unit_cost'] ?? 0) : 0.0;
-            $weightedCost = $new > 0 ? (($prev * $oldCost) + ($qty * $price)) / $new : $price;
-            offline_save_inventory($pdo, $locationId, $name, $new, $weightedCost, $sku, $inv ? (int)$inv['id'] : null);
-            if ($inv) {
-                offline_cleanup_inventory_duplicates($pdo, (int)$inv['id'], (array)($inv['duplicate_ids'] ?? []));
-            }
             $purchaseStmt->execute([$orderId, $pid, $name, $qty, $price, $price * $qty, $item['condition'], $item['reason']]);
-            offline_insert_stock_movement($pdo, $pid, 'in', $qty, $prev, $new, 'offline_customer_purchase', $orderCode, 'Purchased from customer ' . $orderCode . ' - ' . $item['condition'] . ' / ' . $item['reason'] . ' [Location:' . $locationId . ']', $price, $userLabel, null, $locationId);
         }
+
+        offline_sync_purchase_stock_edit($pdo, $oldLocationId, $locationId, $oldPurchaseRows, $purchaseItems, $orderCode, $userLabel);
 
         $upd = $pdo->prepare("
             UPDATE offline_sale_orders

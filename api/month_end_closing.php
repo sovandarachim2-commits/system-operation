@@ -12,6 +12,7 @@ const MEC_STEPS = [
     'cash_bank' => 'Cash & Bank Reconciliation',
     'marketing_stock' => 'Marketing Stock Reconciliation',
     'adjustments' => 'Stock Adjustments',
+    'missing_stock' => 'Missing Stock',
     'expenses' => 'Expense Closing',
     'final_review' => 'Final Review',
 ];
@@ -314,6 +315,138 @@ function mec_inventory_snapshot_rows(PDO $pdo, string $month, string $to): array
         ORDER BY item_name ASC
         LIMIT 120
     ");
+}
+
+function mec_storage_location_names(PDO $pdo): array
+{
+    if (!api_table_exists($pdo, 'storage_locations')) {
+        return [];
+    }
+    $nameCol = mec_pick($pdo, 'storage_locations', ['location_name', 'name']);
+    $codeCol = mec_pick($pdo, 'storage_locations', ['location_code', 'code']);
+    $select = 'id';
+    if ($nameCol) {
+        $select .= ', ' . api_quote_identifier($nameCol) . ' AS location_name';
+    }
+    if ($codeCol) {
+        $select .= ', ' . api_quote_identifier($codeCol) . ' AS location_code';
+    }
+    $names = [];
+    foreach (mec_fetch_rows($pdo, "SELECT {$select} FROM storage_locations") as $loc) {
+        $label = trim((string)($loc['location_name'] ?? ''));
+        if ($label === '') {
+            $label = trim((string)($loc['location_code'] ?? ''));
+        }
+        if ($label === '') {
+            $label = 'Location ' . (int)($loc['id'] ?? 0);
+        }
+        $names[(string)(int)($loc['id'] ?? 0)] = $label;
+    }
+    return $names;
+}
+
+function mec_missing_stock(PDO $pdo, string $month): array
+{
+    $empty = ['complete' => false, 'status' => '', 'pending' => 0, 'report_id' => 0, 'rows' => []];
+    if (!api_table_exists($pdo, 'eom_stock_reports') || !api_table_exists($pdo, 'eom_stock_report_details')) {
+        return $empty;
+    }
+    $report = mec_fetch_rows(
+        $pdo,
+        "SELECT id, status FROM eom_stock_reports WHERE report_month = ? ORDER BY CASE LOWER(status) WHEN 'finalized' THEN 0 WHEN 'reviewed' THEN 1 WHEN 'draft' THEN 2 ELSE 3 END, id DESC LIMIT 1",
+        [$month]
+    );
+    $reportId = (int)($report[0]['id'] ?? 0);
+    $status = strtolower((string)($report[0]['status'] ?? ''));
+    if ($reportId <= 0) {
+        return $empty;
+    }
+
+    $hasCurrent = mec_has($pdo, 'eom_stock_report_details', 'current_stock');
+    $hasFinalLoc = mec_has($pdo, 'eom_stock_report_details', 'final_location_qty_json');
+    $hasSystemLoc = mec_has($pdo, 'eom_stock_report_details', 'system_location_qty_json');
+    $systemExpr = $hasCurrent ? 'COALESCE(d.current_stock, d.closing_quantity, 0)' : 'COALESCE(d.closing_quantity, 0)';
+    $locCols = '';
+    if ($hasFinalLoc) {
+        $locCols .= ', d.final_location_qty_json';
+    }
+    if ($hasSystemLoc) {
+        $locCols .= ', d.system_location_qty_json';
+    }
+    $details = mec_fetch_rows($pdo, "
+        SELECT d.item_name AS product,
+               COALESCE(NULLIF(TRIM(d.sku), ''), '') AS sku,
+               {$systemExpr} AS system_qty,
+               d.final_quantity AS physical
+               {$locCols}
+        FROM eom_stock_report_details d
+        WHERE d.eom_report_id = ?
+        ORDER BY d.item_name ASC
+    ", [$reportId]);
+
+    $pending = 0;
+    foreach ($details as $detail) {
+        if ($detail['physical'] === null || $detail['physical'] === '') {
+            $pending++;
+        }
+    }
+    $complete = $details !== [] && $pending === 0;
+    $rows = [];
+    if ($complete) {
+        $locationNames = mec_storage_location_names($pdo);
+        foreach ($details as $detail) {
+            $product = (string)($detail['product'] ?? '');
+            $sku = (string)($detail['sku'] ?? '');
+            $finalMap = $hasFinalLoc ? json_decode((string)($detail['final_location_qty_json'] ?? ''), true) : null;
+            $systemMap = $hasSystemLoc ? json_decode((string)($detail['system_location_qty_json'] ?? ''), true) : null;
+            if (is_array($finalMap) && $finalMap !== [] && is_array($systemMap) && $systemMap !== []) {
+                $systemMap = is_array($systemMap) ? $systemMap : [];
+                foreach ($finalMap as $locId => $physicalQty) {
+                    if ($physicalQty === null || $physicalQty === '' || !is_numeric($physicalQty)) {
+                        continue;
+                    }
+                    $physical = (float)$physicalQty;
+                    $system = (float)($systemMap[$locId] ?? $systemMap[(string)$locId] ?? 0);
+                    $missing = $system - $physical;
+                    if ($missing <= 0.005) {
+                        continue;
+                    }
+                    $locKey = (string)(int)$locId;
+                    $rows[] = [
+                        'product' => $product,
+                        'sku' => $sku,
+                        'location' => $locationNames[$locKey] ?? ('Location ' . $locKey),
+                        'system' => $system,
+                        'physical' => $physical,
+                        'missing' => $missing,
+                    ];
+                }
+                continue;
+            }
+            $system = (float)($detail['system_qty'] ?? 0);
+            $physical = (float)($detail['physical'] ?? 0);
+            $missing = $system - $physical;
+            if ($missing <= 0.005) {
+                continue;
+            }
+            $rows[] = [
+                'product' => $product,
+                'sku' => $sku,
+                'location' => '',
+                'system' => $system,
+                'physical' => $physical,
+                'missing' => $missing,
+            ];
+        }
+    }
+
+    return [
+        'complete' => $complete,
+        'status' => $status,
+        'pending' => $pending,
+        'report_id' => $reportId,
+        'rows' => $rows,
+    ];
 }
 
 function mec_ensure_schema(PDO $pdo): void
@@ -1950,6 +2083,13 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
         'marketing' => $marketingRows,
         'marketing_products' => $marketingProducts,
         'adjustments' => $adjustmentRows,
+        'missing_stock' => ($missingStock = mec_missing_stock($pdo, $month))['rows'],
+        'missing_stock_meta' => [
+            'complete' => (bool)$missingStock['complete'],
+            'status' => (string)$missingStock['status'],
+            'pending' => (int)$missingStock['pending'],
+            'report_id' => (int)$missingStock['report_id'],
+        ],
         'expenses' => $expenses,
         'expense_groups' => $expenseGroups,
         'expense_summary' => $expenseSummary,
@@ -2017,6 +2157,10 @@ function mec_merge_actuals(array $rows, array $steps): array
         if ($key === 'adjustments' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['adjustments']) && is_array($actual['adjustments'])) {
             $rows['adjustments'] = $actual['adjustments'];
         }
+        if ($key === 'missing_stock' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED') {
+            if (isset($actual['missing_stock']) && is_array($actual['missing_stock'])) $rows['missing_stock'] = $actual['missing_stock'];
+            if (isset($actual['missing_stock_meta']) && is_array($actual['missing_stock_meta'])) $rows['missing_stock_meta'] = $actual['missing_stock_meta'];
+        }
         if ($key === 'sales' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && !empty($actual['sales_frozen'])) {
             if (isset($actual['sales']) && is_array($actual['sales'])) $rows['sales'] = $actual['sales'];
             $rows['sales_orders'] = is_array($actual['sales_orders'] ?? null) ? $actual['sales_orders'] : [];
@@ -2040,6 +2184,7 @@ function mec_step_records(PDO $pdo, int $closingId, array $rows): array
         $status = (string)($row['status'] ?? 'PENDING');
         if ($key === 'final_review' && empty($row)) $status = 'LOCKED';
         if ($key === 'cash_bank' && empty($row) && $issueCount > 0) $status = 'NEEDS_REVIEW';
+        if ($key === 'missing_stock' && empty($row) && $issueCount > 0) $status = 'NEEDS_REVIEW';
         $result[] = [
             'step_key' => $key,
             'status' => $status,
@@ -2071,6 +2216,7 @@ function mec_issue_count(string $key, array $rows): int
     if ($key === 'inventory') return count(array_filter($rows['inventory'] ?? [], static fn($row) => isset($row['physical']) && (string)$row['physical'] !== '' && abs((float)$row['physical'] - mec_expected_inventory($row)) > 0.004));
     if ($key === 'marketing_stock') return count(array_filter($rows['marketing'] ?? [], static fn($row) => (float)($row['remaining'] ?? 0) > 0.0001));
     if ($key === 'adjustments') return count(array_filter($rows['adjustments'] ?? [], static fn($row) => !in_array((string)($row['approval_status'] ?? ''), ['Approved', 'approved'], true)));
+    if ($key === 'missing_stock') return !empty($rows['missing_stock_meta']['complete']) ? 0 : 1;
     return 0;
 }
 
@@ -2101,6 +2247,7 @@ function mec_system_value(string $key, array $rows): float
     if ($key === 'inventory') return array_reduce($rows['inventory'] ?? [], static fn($sum, $row) => $sum + mec_expected_inventory($row), 0.0);
     if ($key === 'marketing_stock') return array_reduce($rows['marketing'] ?? [], static fn($sum, $row) => $sum + (float)($row['issued'] ?? 0), 0.0);
     if ($key === 'adjustments') return array_reduce($rows['adjustments'] ?? [], static fn($sum, $row) => $sum + abs((float)($row['difference_qty'] ?? 0)), 0.0);
+    if ($key === 'missing_stock') return array_reduce($rows['missing_stock'] ?? [], static fn($sum, $row) => $sum + (float)($row['missing'] ?? 0), 0.0);
     if ($key === 'expenses') return array_reduce($rows['expenses'] ?? [], static fn($sum, $row) => $sum + (float)($row[1] ?? 0), 0.0);
     return 0.0;
 }
@@ -2268,6 +2415,7 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
             'expected_closing_stock' => $inventoryExpected,
             'system_closing_stock' => mec_sum_assoc($inventoryRows, 'system'),
             'physical_count' => $inventoryPhysical,
+            'missing_stock' => array_reduce($rows['missing_stock'] ?? [], static fn(float $sum, array $row): float => $sum + (float)($row['missing'] ?? 0), 0.0),
             'variance' => $inventoryPhysical - $inventoryExpected,
             'approved_adjustment' => 0.0,
             'final_reconciled_stock' => $inventoryPhysical,
@@ -2396,7 +2544,7 @@ try {
 
         if ($action === 'unlock_step') {
             $key = trim((string)($payload['step_key'] ?? ''));
-            $lockable = ['sales', 'receivable', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments'];
+            $lockable = ['sales', 'receivable', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
             if (!in_array($key, $lockable, true)) {
                 api_error('This step cannot be unlocked.', 422);
             }
@@ -2550,6 +2698,24 @@ try {
             $postedAdjustments = is_array($payload['snapshot'] ?? null) ? $payload['snapshot'] : ($rows['adjustments'] ?? []);
             mec_save_step($pdo, $closingId, 'adjustments', 'LOCKED', mec_required_note($payload), [
                 'adjustments' => $postedAdjustments,
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_missing_stock') {
+            $missingSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'missing_stock') $missingSaved = $savedStep;
+            }
+            if (strtoupper((string)($missingSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Missing Stock is locked. Changes require manager unlock.', 409);
+            }
+            if (empty($rows['missing_stock_meta']['complete'])) {
+                api_error('Finish the physical count on EOM Closing before closing Missing Stock.', 422);
+            }
+            mec_save_step($pdo, $closingId, 'missing_stock', 'LOCKED', mec_required_note($payload), [
+                'missing_stock' => $rows['missing_stock'] ?? [],
+                'missing_stock_meta' => $rows['missing_stock_meta'] ?? [],
             ], $rows);
             mec_response($pdo, $month);
         }
