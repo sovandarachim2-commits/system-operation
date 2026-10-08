@@ -408,7 +408,7 @@ function mec_missing_stock(PDO $pdo, string $month): array
                     $physical = (float)$physicalQty;
                     $system = (float)($systemMap[$locId] ?? $systemMap[(string)$locId] ?? 0);
                     $missing = $system - $physical;
-                    if ($missing <= 0.005) {
+                    if (abs($missing) <= 0.005) {
                         continue;
                     }
                     $locKey = (string)(int)$locId;
@@ -418,7 +418,8 @@ function mec_missing_stock(PDO $pdo, string $month): array
                         'location' => $locationNames[$locKey] ?? ('Location ' . $locKey),
                         'system' => $system,
                         'physical' => $physical,
-                        'missing' => $missing,
+                        'missing' => max(0, $missing),
+                        'extra' => max(0, -$missing),
                     ];
                 }
                 continue;
@@ -429,7 +430,7 @@ function mec_missing_stock(PDO $pdo, string $month): array
             $system = (float)($detail['system_qty'] ?? 0);
             $physical = (float)($detail['physical'] ?? 0);
             $missing = $system - $physical;
-            if ($missing <= 0.005) {
+            if (abs($missing) <= 0.005) {
                 continue;
             }
             $rows[] = [
@@ -438,7 +439,8 @@ function mec_missing_stock(PDO $pdo, string $month): array
                 'location' => '',
                 'system' => $system,
                 'physical' => $physical,
-                'missing' => $missing,
+                'missing' => max(0, $missing),
+                'extra' => max(0, -$missing),
             ];
         }
     }
@@ -1659,9 +1661,24 @@ function mec_offline_team_sales(PDO $pdo, string $from, string $to, string $offl
         $teamExpr = "COALESCE(NULLIF(TRIM(t.name), ''), '')";
     }
     $active = str_replace('COALESCE(status,', 'COALESCE(o.status,', $offlineActive);
+    $statusExpr = "LOWER(COALESCE(o.status, ''))";
+    $receivedExpr = mec_has($pdo, 'offline_sale_orders', 'received_amount')
+        ? 'COALESCE(o.' . api_quote_identifier('received_amount') . ', 0)'
+        : '0';
+    $paidWhen = "($statusExpr = 'paid' OR $receivedExpr >= $amountExpr)";
+    $partialWhen = "($statusExpr = 'partial' OR ($receivedExpr > 0 AND $receivedExpr < $amountExpr))";
+    $unpaidWhen = "($amountExpr > 0 AND $receivedExpr <= 0 AND $statusExpr IN ('unpaid', 'credit'))";
+    $paidSelect = "CASE WHEN $paidWhen THEN $amountExpr ELSE 0 END";
+    $partialSelect = "CASE WHEN NOT ($paidWhen) AND ($partialWhen) THEN $amountExpr ELSE 0 END";
+    $unpaidSelect = "CASE WHEN NOT ($paidWhen) AND NOT ($partialWhen) AND ($unpaidWhen) THEN $amountExpr ELSE 0 END";
     $rows = mec_fetch_rows(
         $pdo,
-        "SELECT $teamExpr AS team, COUNT(*) AS orders, COALESCE(SUM($amountExpr), 0) AS amount
+        "SELECT $teamExpr AS team,
+                COUNT(*) AS orders,
+                COALESCE(SUM($amountExpr), 0) AS amount,
+                COALESCE(SUM($paidSelect), 0) AS paid,
+                COALESCE(SUM($partialSelect), 0) AS partial,
+                COALESCE(SUM($unpaidSelect), 0) AS unpaid
          FROM offline_sale_orders o
          $join
          WHERE DATE($dateExpr) BETWEEN ? AND ? AND ($active)
@@ -1675,6 +1692,9 @@ function mec_offline_team_sales(PDO $pdo, string $from, string $to, string $offl
             'team' => (string)($row['team'] ?? ''),
             'orders' => (int)($row['orders'] ?? 0),
             'amount' => (float)($row['amount'] ?? 0),
+            'paid' => (float)($row['paid'] ?? 0),
+            'partial' => (float)($row['partial'] ?? 0),
+            'unpaid' => (float)($row['unpaid'] ?? 0),
         ];
     }
     return $teams;
@@ -1856,18 +1876,21 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
                     COALESCE(items.total_not_returned, 0) AS not_returned
              FROM marketing_takes mt
              LEFT JOIN (
-                SELECT marketing_take_id,
+                SELECT mti.marketing_take_id,
                        COUNT(*) AS item_count,
-                       SUM(quantity_taken) AS total_taken,
-                       SUM(quantity_returned) AS total_returned,
-                       SUM(quantity_not_returned) AS total_not_returned
-                FROM marketing_take_items
-                GROUP BY marketing_take_id
+                       SUM(mti.quantity_taken) AS total_taken,
+                       SUM(mti.quantity_returned) AS total_returned,
+                       SUM(mti.quantity_not_returned) AS total_not_returned
+                FROM marketing_take_items mti
+                INNER JOIN marketing_takes mt_items ON mt_items.id = mti.marketing_take_id
+                WHERE mt_items.event_date BETWEEN ? AND ?
+                  AND mt_items.status <> 'rejected'
+                GROUP BY mti.marketing_take_id
              ) items ON items.marketing_take_id = mt.id
              WHERE mt.event_date BETWEEN ? AND ?
                AND mt.status <> 'rejected'
              ORDER BY mt.event_date ASC, mt.id ASC",
-            [$from, $to]
+            [$from, $to, $from, $to]
         );
         foreach ($marketingSource as $source) {
             $takeStatus = (string)($source['take_status'] ?? '');
@@ -2154,10 +2177,10 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
             'orderDetails' => [],
             'offlineTeams' => mec_offline_team_sales($pdo, $from, $to, $offlineActive),
             'sourcePerformance' => [
-                ['key' => 'online', 'label' => 'Online', 'orders' => $onlineOrderCount, 'amount' => $onlineSales],
-                ['key' => 'offline', 'label' => 'Offline', 'orders' => $offlineOrderCount, 'amount' => $offlineSales],
-                ['key' => 'dealer', 'label' => 'Dealer Order', 'orders' => $dealerOrderCount, 'amount' => $dealerSales],
-                ['key' => 'total', 'label' => 'Total', 'orders' => $activeOrderCount, 'amount' => $onlineSales + $offlineSales + $dealerSales],
+                ['key' => 'online', 'label' => 'Online', 'orders' => $onlineOrderCount, 'amount' => $onlineSales, 'paid' => $onlinePaidAmount, 'partial' => $onlinePartialAmount, 'unpaid' => $onlineUnpaidAmount],
+                ['key' => 'offline', 'label' => 'Offline', 'orders' => $offlineOrderCount, 'amount' => $offlineSales, 'paid' => $offlinePaidAmount, 'partial' => $offlinePartialAmount, 'unpaid' => $offlineUnpaidAmount],
+                ['key' => 'dealer', 'label' => 'Dealer Order', 'orders' => $dealerOrderCount, 'amount' => $dealerSales, 'paid' => $dealerPaidAmount, 'partial' => $dealerPartialAmount, 'unpaid' => $dealerUnpaidAmount],
+                ['key' => 'total', 'label' => 'Total', 'orders' => $activeOrderCount, 'amount' => $onlineSales + $offlineSales + $dealerSales, 'paid' => $paidAmount, 'partial' => $partialAmount, 'unpaid' => $unpaidCreditAmount],
             ],
         ],
         'receivable' => $receivableRows,

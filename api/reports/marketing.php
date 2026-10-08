@@ -62,8 +62,13 @@ function marketing_default_types(): array
 
 function marketing_types(?PDO $pdo = null, bool $activeOnly = true): array
 {
+    static $cache = [];
     if (!$pdo) {
         return marketing_default_types();
+    }
+    $cacheKey = spl_object_id($pdo) . ($activeOnly ? ':active' : ':all');
+    if (isset($cache[$cacheKey])) {
+        return $cache[$cacheKey];
     }
     try {
         marketing_ensure_columns($pdo);
@@ -77,10 +82,12 @@ function marketing_types(?PDO $pdo = null, bool $activeOnly = true): array
                 $types[$key] = $label;
             }
         }
-        return $types ?: marketing_default_types();
+        $cache[$cacheKey] = $types ?: marketing_default_types();
+        return $cache[$cacheKey];
     } catch (Throwable $e) {
         error_log('marketing_types: ' . $e->getMessage());
-        return marketing_default_types();
+        $cache[$cacheKey] = marketing_default_types();
+        return $cache[$cacheKey];
     }
 }
 
@@ -125,6 +132,12 @@ function marketing_phone($value): string
 
 function marketing_ensure_columns(PDO $pdo): void
 {
+    static $ready = [];
+    $key = spl_object_id($pdo);
+    if (isset($ready[$key])) {
+        return;
+    }
+    $ready[$key] = true;
     try {
         $stmt = $pdo->query("SHOW COLUMNS FROM marketing_takes LIKE 'marketing_type'");
         if (!$stmt || !$stmt->fetch(PDO::FETCH_ASSOC)) {
@@ -500,20 +513,22 @@ function marketing_list(PDO $pdo, array $filters, int $userId, bool $canViewAll,
         LEFT JOIN delivery_types dt ON mt.delivery_type_id = dt.id
         LEFT JOIN (
             SELECT
-                marketing_take_id,
+                mti.marketing_take_id,
                 COUNT(*) AS item_count,
-                SUM(quantity_taken) AS total_taken,
-                SUM(quantity_returned) AS total_returned,
-                SUM(quantity_not_returned) AS total_not_returned,
-                SUM(CASE WHEN ABS((quantity_returned + quantity_not_returned) - quantity_taken) < 0.0001 THEN 1 ELSE 0 END) AS reconciled_count,
-                SUM(CASE WHEN (quantity_returned + quantity_not_returned) > 0.0001 THEN 1 ELSE 0 END) AS in_progress_count
-            FROM marketing_take_items
-            GROUP BY marketing_take_id
+                SUM(mti.quantity_taken) AS total_taken,
+                SUM(mti.quantity_returned) AS total_returned,
+                SUM(mti.quantity_not_returned) AS total_not_returned,
+                SUM(CASE WHEN ABS((mti.quantity_returned + mti.quantity_not_returned) - mti.quantity_taken) < 0.0001 THEN 1 ELSE 0 END) AS reconciled_count,
+                SUM(CASE WHEN (mti.quantity_returned + mti.quantity_not_returned) > 0.0001 THEN 1 ELSE 0 END) AS in_progress_count
+            FROM marketing_take_items mti
+            INNER JOIN marketing_takes mt_items ON mt_items.id = mti.marketing_take_id
+            WHERE mt_items.event_date BETWEEN ? AND ?
+            GROUP BY mti.marketing_take_id
         ) items ON items.marketing_take_id = mt.id
         {$whereSql}
         ORDER BY mt.event_date DESC, mt.id DESC
         LIMIT 500
-    ", $params);
+    ", array_merge([$from, $to], $params));
 
     foreach ($rows as &$row) {
         $row['item_count'] = marketing_qty($row['item_count'] ?? 0);
@@ -526,6 +541,9 @@ function marketing_list(PDO $pdo, array $filters, int $userId, bool $canViewAll,
         $row = marketing_attach_images($row);
     }
     unset($row);
+    if (marketing_flag($filters['include_items'] ?? 0)) {
+        marketing_attach_take_items($pdo, $rows);
+    }
 
     $productWhereSql = $whereSql;
     $productParams = $params;
@@ -592,6 +610,49 @@ function marketing_list(PDO $pdo, array $filters, int $userId, bool $canViewAll,
         'counts' => marketing_status_counts($pdo, $from, $to, $userId, $canViewAll, $marketingTypes, $productId, $createdBy),
         'type_counts' => marketing_type_counts($pdo, $from, $to, $userId, $canViewAll, $mode, $status, $productId, $createdBy),
     ];
+}
+
+function marketing_attach_take_items(PDO $pdo, array &$rows): void
+{
+    $ids = [];
+    foreach ($rows as $row) {
+        $id = (int)($row['id'] ?? 0);
+        if ($id > 0) {
+            $ids[$id] = $id;
+        }
+    }
+    if (!$ids) {
+        foreach ($rows as &$row) {
+            $row['items'] = [];
+        }
+        unset($row);
+        return;
+    }
+    $ids = array_values($ids);
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $items = marketing_rows($pdo, "
+        SELECT mti.id, mti.marketing_take_id, mti.product_id,
+               mti.quantity_taken, mti.quantity_returned, mti.quantity_not_returned,
+               (mti.quantity_taken - mti.quantity_returned - mti.quantity_not_returned) AS remaining_qty,
+               p.name AS product_name, p.sku
+        FROM marketing_take_items mti
+        JOIN products p ON p.id = mti.product_id
+        WHERE mti.marketing_take_id IN ({$placeholders})
+        ORDER BY p.name ASC
+    ", $ids);
+    $byTake = [];
+    foreach ($items as $item) {
+        $item['quantity_taken'] = marketing_qty($item['quantity_taken'] ?? 0);
+        $item['quantity_returned'] = marketing_qty($item['quantity_returned'] ?? 0);
+        $item['quantity_not_returned'] = marketing_qty($item['quantity_not_returned'] ?? 0);
+        $item['remaining_qty'] = max(0, marketing_qty($item['remaining_qty'] ?? 0));
+        $takeId = (int)($item['marketing_take_id'] ?? 0);
+        $byTake[$takeId][] = $item;
+    }
+    foreach ($rows as &$row) {
+        $row['items'] = $byTake[(int)($row['id'] ?? 0)] ?? [];
+    }
+    unset($row);
 }
 
 function marketing_detail(PDO $pdo, int $id, int $userId, bool $canViewAll): array

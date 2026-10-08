@@ -4,7 +4,7 @@
 
 // Database settings
 $DB_HOST = 'localhost';
-$DB_NAME = 'eod';
+$DB_NAME = 'shadowdata';
 $DB_USER = 'root';
 $DB_PASS = '';
 

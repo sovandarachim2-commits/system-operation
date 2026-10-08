@@ -1697,6 +1697,130 @@ function inventory_closing_save_final_quantity(PDO $pdo, string $reportType, int
     ];
 }
 
+function inventory_eom_list_system_closing(PDO $pdo, array $reports): array
+{
+    $out = [];
+    $ids = [];
+    $monthById = [];
+    foreach ($reports as $report) {
+        $id = (int)($report['id'] ?? 0);
+        if ($id <= 0) {
+            continue;
+        }
+        $ids[] = $id;
+        $monthById[$id] = (string)($report['report_month'] ?? '');
+    }
+    if ($ids === []) {
+        return $out;
+    }
+
+    $hasCurrent = false;
+    try {
+        $curCol = $pdo->query("SHOW COLUMNS FROM eom_stock_report_details LIKE 'current_stock'");
+        $hasCurrent = $curCol && $curCol->fetch(PDO::FETCH_ASSOC) ? true : false;
+    } catch (Throwable $e) {
+        $hasCurrent = false;
+    }
+
+    $placeholders = implode(',', array_fill(0, count($ids), '?'));
+    $currentSelect = $hasCurrent ? 'd.current_stock' : 'NULL AS current_stock';
+    $stmt = $pdo->prepare("
+        SELECT d.eom_report_id, d.item_name, d.sku, d.final_quantity, {$currentSelect}
+        FROM eom_stock_report_details d
+        WHERE d.eom_report_id IN ($placeholders)
+    ");
+    $stmt->execute($ids);
+    $byReport = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $detail) {
+        $rid = (int)($detail['eom_report_id'] ?? 0);
+        if ($rid > 0) {
+            $byReport[$rid][] = $detail;
+        }
+    }
+
+    $setKeys = eod_eom_eom_set_keys($pdo, eod_eom_eom_component_map($pdo));
+    $snapshotCache = [];
+    $liveStock = null;
+
+    foreach ($monthById as $rid => $month) {
+        $details = $byReport[$rid] ?? [];
+        if ($details === []) {
+            continue;
+        }
+        $monthEnd = preg_match('/^\d{4}-\d{2}$/', $month)
+            ? date('Y-m-t', strtotime($month . '-01'))
+            : '';
+        if ($monthEnd !== '' && !array_key_exists($monthEnd, $snapshotCache)) {
+            $snapshotCache[$monthEnd] = eod_eom_eod_stock_snapshot($pdo, $monthEnd);
+        }
+        $snapshotItems = $monthEnd !== '' ? ($snapshotCache[$monthEnd]['items'] ?? []) : [];
+        if ($snapshotItems === [] && $liveStock === null) {
+            $liveStock = eod_eom_current_stock_by_item($pdo);
+        }
+        $liveMap = $snapshotItems !== [] ? $snapshotItems : ($liveStock ?? []);
+
+        $grouped = [];
+        foreach ($details as $detail) {
+            $name = (string)($detail['item_name'] ?? '');
+            $key = mb_strtolower(trim($name));
+            if ($key === '') {
+                continue;
+            }
+            if (eod_eom_eom_is_set($name, (string)($detail['sku'] ?? ''), $setKeys)) {
+                continue;
+            }
+            if (!isset($grouped[$key])) {
+                $grouped[$key] = $detail;
+                continue;
+            }
+            $curFinal = $grouped[$key]['final_quantity'];
+            $rowFinal = $detail['final_quantity'];
+            if ($curFinal === null && $rowFinal === null) {
+                $grouped[$key]['final_quantity'] = null;
+            } else {
+                $grouped[$key]['final_quantity'] = inventory_api_num($curFinal ?? 0) + inventory_api_num($rowFinal ?? 0);
+            }
+        }
+
+        $closing = 0.0;
+        $diff = 0.0;
+        $missingQty = 0.0;
+        $extraQty = 0.0;
+        $missingCount = 0;
+        foreach ($grouped as $key => $detail) {
+            $eodCurrent = array_key_exists($key, $snapshotItems) ? (float)$snapshotItems[$key] : null;
+            $stored = array_key_exists('current_stock', $detail) && $detail['current_stock'] !== null
+                ? inventory_api_num($detail['current_stock'])
+                : null;
+            $live = (float)($liveMap[$key] ?? 0);
+            $current = ($eodCurrent !== null) ? $eodCurrent : (($stored !== null) ? $stored : $live);
+            $closing += $current;
+            $final = $detail['final_quantity'];
+            if ($final === null || $final === '') {
+                $missingCount++;
+                continue;
+            }
+            $delta = inventory_api_num($final) - $current;
+            $diff += $delta;
+            if ($delta < -0.0005) {
+                $missingQty += -$delta;
+            } elseif ($delta > 0.0005) {
+                $extraQty += $delta;
+            }
+        }
+
+        $out[$rid] = [
+            'closing' => $closing,
+            'final_difference' => $diff,
+            'missing_qty' => $missingQty,
+            'extra_qty' => $extraQty,
+            'missing_final_count' => $missingCount,
+        ];
+    }
+
+    return $out;
+}
+
 function inventory_closing_list_reports(
     PDO $pdo,
     string $reportType,
@@ -1790,15 +1914,24 @@ function inventory_closing_list_reports(
         try {
             $placeholders = implode(',', array_fill(0, count($ids), '?'));
             if ($reportType === 'eom') {
+                $systemQtyExpr = 'closing_quantity';
+                try {
+                    $curCol = $pdo->query("SHOW COLUMNS FROM eom_stock_report_details LIKE 'current_stock'");
+                    if ($curCol && $curCol->fetch(PDO::FETCH_ASSOC)) {
+                        $systemQtyExpr = 'COALESCE(current_stock, closing_quantity)';
+                    }
+                } catch (Throwable $e) {
+                    $systemQtyExpr = 'closing_quantity';
+                }
                 $sumSql = "
                     SELECT eom_report_id AS report_id,
                            COALESCE(SUM(opening_quantity), 0) AS opening_stock,
-                           COALESCE(SUM(closing_quantity), 0) AS closing_stock,
+                           COALESCE(SUM({$systemQtyExpr}), 0) AS closing_stock,
                            COALESCE(SUM(final_quantity), 0) AS final_stock,
                            COALESCE(SUM(CASE WHEN final_quantity IS NULL THEN 1 ELSE 0 END), 0) AS missing_final_count,
-                           COALESCE(SUM(CASE WHEN final_quantity IS NOT NULL AND final_quantity < closing_quantity THEN closing_quantity - final_quantity ELSE 0 END), 0) AS missing_qty,
-                           COALESCE(SUM(CASE WHEN final_quantity IS NOT NULL AND final_quantity > closing_quantity THEN final_quantity - closing_quantity ELSE 0 END), 0) AS extra_qty,
-                           COALESCE(SUM(CASE WHEN final_quantity IS NOT NULL THEN final_quantity - closing_quantity ELSE 0 END), 0) AS final_difference,
+                           COALESCE(SUM(CASE WHEN final_quantity IS NOT NULL AND final_quantity < {$systemQtyExpr} THEN {$systemQtyExpr} - final_quantity ELSE 0 END), 0) AS missing_qty,
+                           COALESCE(SUM(CASE WHEN final_quantity IS NOT NULL AND final_quantity > {$systemQtyExpr} THEN final_quantity - {$systemQtyExpr} ELSE 0 END), 0) AS extra_qty,
+                           COALESCE(SUM(CASE WHEN final_quantity IS NOT NULL THEN final_quantity - {$systemQtyExpr} ELSE 0 END), 0) AS final_difference,
                            COALESCE(SUM(movements_in), 0) AS stock_in,
                            COALESCE(SUM(movements_out), 0) AS stock_out
                     FROM eom_stock_report_details
@@ -1845,6 +1978,15 @@ function inventory_closing_list_reports(
                 $extraQtyById[$rid] = inventory_api_num($sumRow['extra_qty'] ?? 0);
                 $stockInById[$rid] = inventory_api_num($sumRow['stock_in'] ?? 0);
                 $stockOutById[$rid] = inventory_api_num($sumRow['stock_out'] ?? 0);
+            }
+            if ($reportType === 'eom') {
+                foreach (inventory_eom_list_system_closing($pdo, $rows) as $rid => $totals) {
+                    $closingById[$rid] = inventory_api_num($totals['closing'] ?? 0);
+                    $finalDifferenceById[$rid] = inventory_api_num($totals['final_difference'] ?? 0);
+                    $missingFinalById[$rid] = (int)($totals['missing_final_count'] ?? 0);
+                    $missingQtyById[$rid] = inventory_api_num($totals['missing_qty'] ?? 0);
+                    $extraQtyById[$rid] = inventory_api_num($totals['extra_qty'] ?? 0);
+                }
             }
         } catch (Throwable $e) {
             // Keep list usable even if detail aggregates fail.
