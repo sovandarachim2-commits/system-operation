@@ -4,7 +4,7 @@
 
 // Database settings
 $DB_HOST = 'localhost';
-$DB_NAME = 'closing';
+$DB_NAME = 'eod';
 $DB_USER = 'root';
 $DB_PASS = '';
 
@@ -23,7 +23,7 @@ $REMINDER_TELEGRAM_BOT_TOKEN = '8678367286:AAGTeMCXfmAUkEnD0zauhb2aOG3jDjCAeI4';
 
 // Optional: dedicated Telegram bot token for scanner module.
 // If empty, scanner falls back to TELEGRAM_BOT_TOKEN above.
-$SCANNER_TELEGRAM_BOT_TOKEN = '8656158761:AAF03YbK3YOhgkYdKxU1uHf26liUUesnfek';
+$SCANNER_TELEGRAM_BOT_TOKEN = '8656158761:AAGUu9dAUi3GsVXF_FiyIkihtji6hhrvrSE';
 
 // Scanner image storage: 'local' or 'r2'
 $SCANNER_STORAGE_DRIVER = 'r2';

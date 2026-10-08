@@ -392,7 +392,7 @@ function mec_missing_stock(PDO $pdo, string $month): array
     }
     $complete = $details !== [] && $pending === 0;
     $rows = [];
-    if ($complete) {
+    if ($details !== []) {
         $locationNames = mec_storage_location_names($pdo);
         foreach ($details as $detail) {
             $product = (string)($detail['product'] ?? '');
@@ -421,6 +421,9 @@ function mec_missing_stock(PDO $pdo, string $month): array
                         'missing' => $missing,
                     ];
                 }
+                continue;
+            }
+            if ($detail['physical'] === null || $detail['physical'] === '' || !is_numeric($detail['physical'])) {
                 continue;
             }
             $system = (float)($detail['system_qty'] ?? 0);
@@ -610,9 +613,30 @@ function mec_purchase_closing_data(PDO $pdo, string $from, string $to): array
 
     $receivingCount = 0;
     $receivedQty = 0.0;
+    $receivingRows = [];
     if (api_table_exists($pdo, 'purchase_receiving')) {
         $receivingCount = (int)mec_scalar($pdo, 'SELECT COUNT(DISTINCT pr.id) FROM purchase_receiving pr WHERE DATE(pr.receiving_date) BETWEEN ? AND ?', [$from, $to]);
         if (api_table_exists($pdo, 'purchase_receiving_items')) {
+            $receivingRows = mec_fetch_rows(
+                $pdo,
+                "SELECT pr.id, DATE(pr.receiving_date) AS receiving_date,
+                        po.order_number AS po_no, COALESCE(pv.name, '') AS supplier,
+                        COALESCE(u.name, '') AS received_by,
+                        COALESCE(items.total_qty, 0) AS total_qty,
+                        COALESCE(items.total_cost, 0) AS total_cost
+                 FROM purchase_receiving pr
+                 JOIN purchase_orders po ON po.id = pr.purchase_order_id
+                 LEFT JOIN purchase_vendors pv ON pv.id = po.vendor_id
+                 LEFT JOIN users u ON u.id = pr.received_by
+                 LEFT JOIN (
+                     SELECT receiving_id, SUM(quantity_received) AS total_qty,
+                            SUM(total_cost) AS total_cost
+                     FROM purchase_receiving_items GROUP BY receiving_id
+                 ) items ON items.receiving_id = pr.id
+                 WHERE DATE(pr.receiving_date) BETWEEN ? AND ?
+                 ORDER BY pr.receiving_date ASC, pr.id ASC",
+                [$from, $to]
+            );
             $receivedQty = (float)mec_scalar(
                 $pdo,
                 'SELECT COALESCE(SUM(pri.quantity_received), 0)
@@ -624,11 +648,73 @@ function mec_purchase_closing_data(PDO $pdo, string $from, string $to): array
         }
     }
 
+    if ($receivingRows) {
+        $receivingIds = array_map(static fn(array $row): int => (int)$row['id'], $receivingRows);
+        $placeholders = implode(',', array_fill(0, count($receivingIds), '?'));
+        $receivingItems = mec_fetch_rows(
+            $pdo,
+            "SELECT pri.receiving_id, COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item') AS item_name,
+                    SUM(pri.quantity_received) AS qty, SUM(pri.total_cost) AS cost
+             FROM purchase_receiving_items pri
+             JOIN purchase_order_items poi ON poi.id = pri.purchase_order_item_id
+             WHERE pri.receiving_id IN ($placeholders)
+             GROUP BY pri.receiving_id, COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item')",
+            $receivingIds
+        );
+        $productsByReceipt = [];
+        foreach ($receivingItems as $item) {
+            $productsByReceipt[(int)$item['receiving_id']][(string)$item['item_name']] = [
+                'qty' => (float)$item['qty'],
+                'cost' => (float)$item['cost'],
+            ];
+        }
+        foreach ($receivingRows as &$receivingRow) {
+            $receivingRow['products'] = $productsByReceipt[(int)$receivingRow['id']] ?? [];
+        }
+        unset($receivingRow);
+    }
+
     $returnCount = 0;
     $returnAmount = 0.0;
+    $returnRows = [];
     if (api_table_exists($pdo, 'purchase_returns')) {
-        $returnCount = (int)mec_scalar($pdo, 'SELECT COUNT(*) FROM purchase_returns WHERE DATE(return_date) BETWEEN ? AND ?', [$from, $to]);
-        $returnAmount = (float)mec_scalar($pdo, 'SELECT COALESCE(SUM(total_amount), 0) FROM purchase_returns WHERE DATE(return_date) BETWEEN ? AND ?', [$from, $to]);
+        $returnCount = (int)mec_scalar($pdo, "SELECT COUNT(*) FROM purchase_returns WHERE DATE(return_date) BETWEEN ? AND ? AND LOWER(COALESCE(status, '')) NOT IN ('cancel','cancelled','canceled')", [$from, $to]);
+        $returnAmount = (float)mec_scalar($pdo, "SELECT COALESCE(SUM(total_amount), 0) FROM purchase_returns WHERE DATE(return_date) BETWEEN ? AND ? AND LOWER(COALESCE(status, '')) NOT IN ('cancel','cancelled','canceled')", [$from, $to]);
+        if (api_table_exists($pdo, 'purchase_return_items')) {
+            $returnItems = mec_fetch_rows(
+                $pdo,
+                "SELECT pr.id, DATE(pr.return_date) AS return_date, pr.return_number,
+                        COALESCE(pv.name, '') AS supplier, COALESCE(u.name, '') AS returned_by,
+                        COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item') AS item_name,
+                        COALESCE(SUM(pri.quantity_returned), 0) AS qty,
+                        COALESCE(SUM(pri.total_cost), 0) AS cost
+                 FROM purchase_returns pr
+                 LEFT JOIN purchase_vendors pv ON pv.id = pr.vendor_id
+                 LEFT JOIN users u ON u.id = pr.created_by
+                 LEFT JOIN purchase_return_items pri ON pri.purchase_return_id = pr.id
+                 LEFT JOIN purchase_order_items poi ON poi.id = pri.purchase_order_item_id
+                 WHERE DATE(pr.return_date) BETWEEN ? AND ?
+                   AND LOWER(COALESCE(pr.status, '')) NOT IN ('cancel','cancelled','canceled')
+                 GROUP BY pr.id, DATE(pr.return_date), pr.return_number, pv.name, u.name,
+                          COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item')
+                 ORDER BY pr.return_date ASC, pr.id ASC",
+                [$from, $to]
+            );
+            foreach ($returnItems as $item) {
+                $id = (int)$item['id'];
+                if (!isset($returnRows[$id])) {
+                    $returnRows[$id] = [
+                        'id' => $id, 'return_date' => $item['return_date'],
+                        'return_number' => $item['return_number'], 'supplier' => $item['supplier'],
+                        'returned_by' => $item['returned_by'], 'products' => [],
+                    ];
+                }
+                $returnRows[$id]['products'][(string)$item['item_name']] = [
+                    'qty' => (float)$item['qty'], 'cost' => (float)$item['cost'],
+                ];
+            }
+            $returnRows = array_values($returnRows);
+        }
     }
 
     $incompleteStmt = $pdo->prepare(
@@ -664,6 +750,8 @@ function mec_purchase_closing_data(PDO $pdo, string $from, string $to): array
             'incomplete_count' => $incompleteCount,
             'incomplete_amount' => $incompleteAmount,
         ],
+        'receiving' => $receivingRows,
+        'returns' => $returnRows,
         'review' => [
             ['Purchase Orders', $orderCount, 'Checked', $purchaseTotal],
             ['Receiving', $receivingCount, $receivingCount > 0 ? 'Checked' : 'Matched', $receivedQty],
@@ -2608,9 +2696,6 @@ try {
             }
             if (strtoupper((string)($purchaseSaved['status'] ?? '')) === 'LOCKED') {
                 api_error('Purchase / Supplier Closing is locked. Changes require manager unlock.', 409);
-            }
-            if (mec_issue_count('purchase', $rows) > 0) {
-                api_error('Finish incomplete purchase records before closing.', 422);
             }
             mec_save_step($pdo, $closingId, 'purchase', 'LOCKED', mec_required_note($payload), [
                 'purchase' => $rows['purchase'] ?? [],
