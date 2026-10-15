@@ -166,6 +166,7 @@ function rbac_system_report_modules(): array
             ['resource' => 'sr_income_statement', 'label' => 'Income Statement', 'actions' => ['view']],
             ['resource' => 'sr_product_costing', 'label' => 'Online Product Costing', 'actions' => ['view', 'update']],
             ['resource' => 'sr_offline_product_costing', 'label' => 'Offline Product Costing', 'actions' => ['view', 'update']],
+            ['resource' => 'sr_dealer_product_costing', 'label' => 'Dealer Product Costing', 'actions' => ['view', 'update']],
         ],
         'Sale' => [
             ['resource' => 'sr_orders', 'label' => 'Online Sale', 'actions' => ['view', 'create', 'update']],
@@ -223,6 +224,7 @@ function rbac_system_report_modules(): array
             ['resource' => 'sr_expense_companies', 'label' => 'Companies', 'actions' => ['view', 'create', 'update', 'delete']],
             ['resource' => 'sr_bank_balances', 'label' => 'Bank Balances', 'actions' => ['view', 'create', 'update', 'delete']],
             ['resource' => 'sr_month_end_closing', 'label' => 'Month-End Closing', 'actions' => ['view', 'update', 'approve', 'close']],
+            ['resource' => 'sr_unlock_requests', 'label' => 'Unlock Requests', 'actions' => ['view', 'approve']],
         ],
         'Accountant' => [
             ['resource' => 'commission_sales', 'label' => 'Commission', 'actions' => ['view', 'create', 'update', 'delete']],

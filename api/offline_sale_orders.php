@@ -3,9 +3,22 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/bootstrap.php';
 require_once __DIR__ . '/../admin/offline_lib.php';
+require_once __DIR__ . '/../upload_paths.php';
 
 function offline_api_input(): array
 {
+    if (!empty($_POST) || !empty($_FILES)) {
+        $data = $_POST;
+        foreach (['sale_items', 'purchase_items', 'keep_images'] as $key) {
+            if (isset($data[$key]) && is_string($data[$key])) {
+                $decoded = json_decode($data[$key], true);
+                if (is_array($decoded)) {
+                    $data[$key] = $decoded;
+                }
+            }
+        }
+        return $data;
+    }
     $raw = file_get_contents('php://input');
     $data = json_decode($raw ?: '{}', true);
     return is_array($data) ? $data : [];
@@ -23,11 +36,112 @@ function offline_api_num(mixed $value): float
     return is_finite($number) ? $number : 0.0;
 }
 
+function offline_api_text_length(string $value): int
+{
+    return function_exists('mb_strlen') ? mb_strlen($value, 'UTF-8') : strlen($value);
+}
+
+function offline_api_parse_images($value): array
+{
+    $items = is_array($value) ? $value : json_decode(trim((string)$value), true);
+    if (!is_array($items)) {
+        return [];
+    }
+    $clean = [];
+    foreach ($items as $item) {
+        $path = trim((string)$item);
+        if ($path !== '') {
+            $clean[$path] = $path;
+        }
+    }
+    return array_values($clean);
+}
+
+function offline_api_image_urls($value): array
+{
+    $urls = [];
+    foreach (offline_api_parse_images($value) as $path) {
+        $url = trim((string)uploaded_file_url($path, 'offline_order_images'));
+        if ($url !== '') {
+            $urls[] = $url;
+        }
+    }
+    return $urls;
+}
+
+function offline_api_upload_images(?string $date = null): array
+{
+    $files = $_FILES['images'] ?? null;
+    if (!$files) {
+        return [];
+    }
+    $list = [];
+    if (is_array($files['name'] ?? null)) {
+        foreach ($files['name'] as $index => $name) {
+            $list[] = [
+                'name' => (string)$name,
+                'tmp_name' => (string)($files['tmp_name'][$index] ?? ''),
+                'error' => (int)($files['error'][$index] ?? UPLOAD_ERR_NO_FILE),
+                'size' => (int)($files['size'][$index] ?? 0),
+                'type' => (string)($files['type'][$index] ?? ''),
+            ];
+        }
+    } else {
+        $list[] = $files;
+    }
+    $saved = [];
+    foreach ($list as $file) {
+        if ((int)($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            continue;
+        }
+        $ext = strtolower(pathinfo((string)($file['name'] ?? ''), PATHINFO_EXTENSION));
+        if (!in_array($ext, ['jpg', 'jpeg', 'png', 'webp', 'gif'], true) || (int)($file['size'] ?? 0) > 5 * 1024 * 1024) {
+            continue;
+        }
+        $filename = 'offline_' . date('YmdHis') . '_' . bin2hex(random_bytes(3)) . '.' . $ext;
+        $path = upload_store_uploaded_file($file, 'offline_order_images', $filename, $date, (string)($file['type'] ?? ''));
+        if ($path !== '') {
+            $saved[] = $path;
+        }
+    }
+    return $saved;
+}
+
+function offline_api_store_images($existing, $keep, ?string $date = null): string
+{
+    $current = offline_api_parse_images($existing);
+    $kept = $keep === null ? $current : offline_api_parse_images($keep);
+    $keepSet = array_fill_keys($kept, true);
+    foreach ($current as $path) {
+        if (!isset($keepSet[$path])) {
+            upload_delete_local_file($path, 'offline_order_images');
+        }
+    }
+    $merged = array_slice(array_values(array_unique(array_merge($kept, offline_api_upload_images($date)))), 0, 6);
+    return $merged ? json_encode($merged, JSON_UNESCAPED_SLASHES) : '';
+}
+
+function offline_api_product_options(array $products): array
+{
+    return array_map(static function (array $product): array {
+        return [
+            'value' => (int)$product['id'],
+            'label' => (string)$product['name'],
+            'sku' => (string)($product['sku'] ?? ''),
+            'barcode' => (string)($product['barcode'] ?? ''),
+            'brand_id' => (int)($product['brand_id'] ?? 0),
+            'selling_price' => (float)($product['selling_price'] ?? 0),
+            'unit_cost' => (float)($product['unit_cost'] ?? 0),
+        ];
+    }, $products);
+}
+
 function offline_api_options(PDO $pdo): void
 {
     require_role_or_permission(['admin'], 'sr_offline_orders.view', 'sr_offline_orders.create', 'offline_sales.view', 'offline_sales.create');
 
-    $products = offline_products($pdo);
+    $includeProducts = (string)($_GET['include_products'] ?? '1') !== '0';
+    $products = $includeProducts ? offline_products($pdo) : [];
     $teams = $pdo->query("
         SELECT id AS value, name AS label, location_id
         FROM offline_teams
@@ -64,6 +178,9 @@ function offline_api_options(PDO $pdo): void
             o.total_amount,
             o.received_amount,
             o.payment_date,
+            o.due_date,
+            o.collection_assigned_to,
+            o.images,
             GREATEST(o.total_amount - o.received_amount, 0) AS balance_amount,
             o.created_at,
             o.updated_at,
@@ -79,6 +196,8 @@ function offline_api_options(PDO $pdo): void
     $itemsByOrder = [];
     $paymentsByOrder = [];
     $logsByOrder = [];
+    $logCounts = [];
+    $includeLogs = (string)($_GET['include_logs'] ?? '1') !== '0';
     if ($orders) {
         $orderIds = array_map(static fn(array $row): int => (int)$row['id'], $orders);
         $placeholders = implode(',', array_fill(0, count($orderIds), '?'));
@@ -119,10 +238,23 @@ function offline_api_options(PDO $pdo): void
             ];
         }
         $paymentsByOrder = offline_payments_for_orders($pdo, $orderIds);
-        $logsByOrder = offline_logs_for_orders($pdo, $orderIds);
+        if ($includeLogs) {
+            $logsByOrder = offline_logs_for_orders($pdo, $orderIds);
+        } else {
+            $countStmt = $pdo->prepare("
+                SELECT order_id, COUNT(*) AS log_count
+                FROM offline_sale_order_logs
+                WHERE order_id IN ($placeholders)
+                GROUP BY order_id
+            ");
+            $countStmt->execute($orderIds);
+            foreach ($countStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $logCounts[(int)$row['order_id']] = (int)$row['log_count'];
+            }
+        }
     }
 
-    $orders = array_map(static function (array $order) use ($itemsByOrder, $paymentsByOrder, $logsByOrder): array {
+    $orders = array_map(static function (array $order) use ($itemsByOrder, $paymentsByOrder, $logsByOrder, $logCounts, $includeLogs): array {
         $orderId = (int)$order['id'];
         $order['items'] = $itemsByOrder[$orderId] ?? [];
         $order['payments'] = array_map(static function (array $payment): array {
@@ -135,7 +267,9 @@ function offline_api_options(PDO $pdo): void
                 'created_by_name' => (string)($payment['created_by_name'] ?? ''),
             ];
         }, $paymentsByOrder[$orderId] ?? []);
-        $order['logs'] = array_map(static function (array $log): array {
+        $logs = $logsByOrder[$orderId] ?? [];
+        $order['log_count'] = $includeLogs ? count($logs) : ($logCounts[$orderId] ?? 0);
+        $order['logs'] = $includeLogs ? array_map(static function (array $log): array {
             return [
                 'id' => (int)$log['id'],
                 'action' => (string)$log['action'],
@@ -143,24 +277,17 @@ function offline_api_options(PDO $pdo): void
                 'created_at' => (string)$log['created_at'],
                 'created_by_name' => (string)($log['created_by_name'] ?? ''),
             ];
-        }, $logsByOrder[$orderId] ?? []);
+        }, $logs) : [];
+        $order['images'] = offline_api_parse_images($order['images'] ?? '');
+        $order['image_urls'] = offline_api_image_urls($order['images']);
+        $order['image_url'] = $order['image_urls'][0] ?? '';
         return $order;
     }, $orders);
 
     api_json([
         'success' => true,
         'options' => [
-            'products' => array_map(static function (array $product): array {
-                return [
-                    'value' => (int)$product['id'],
-                    'label' => (string)$product['name'],
-                    'sku' => (string)($product['sku'] ?? ''),
-                    'barcode' => (string)($product['barcode'] ?? ''),
-                    'brand_id' => (int)($product['brand_id'] ?? 0),
-                    'selling_price' => (float)($product['selling_price'] ?? 0),
-                    'unit_cost' => (float)($product['unit_cost'] ?? 0),
-                ];
-            }, $products),
+            'products' => offline_api_product_options($products),
             'teams' => $teams,
             'brands' => $brands,
             'payment_methods' => $paymentMethods,
@@ -193,9 +320,13 @@ function offline_api_location_products(PDO $pdo): void
 
     $nameStmt = $pdo->prepare('SELECT COALESCE(location_name, location_code) FROM storage_locations WHERE id = ? LIMIT 1');
     $nameStmt->execute([$locationId]);
+    $products = array_values(array_filter(
+        offline_location_products_with_stock($pdo, $locationId, offline_products($pdo)),
+        static fn(array $product): bool => (float)($product['available_stock'] ?? 0) > 0
+    ));
     api_json([
         'success' => true,
-        'products' => offline_location_products_with_stock($pdo, $locationId, offline_products($pdo)),
+        'products' => $products,
         'location_id' => $locationId,
         'location_name' => (string)($nameStmt->fetchColumn() ?: ''),
     ]);
@@ -210,6 +341,11 @@ function offline_api_create_order(PDO $pdo, array $user): void
     $phone = trim((string)($payload['phone'] ?? ''));
     $customerLocation = trim((string)($payload['customer_location'] ?? ''));
     $saleDate = offline_api_date($payload['sale_date'] ?? null);
+    $dueDate = trim((string)($payload['due_date'] ?? ''));
+    $collectionAssignedTo = trim((string)($payload['collection_assigned_to'] ?? ''));
+    if (offline_api_text_length($collectionAssignedTo) > 255) {
+        api_error('Collection Assigned To cannot exceed 255 characters.', 422);
+    }
     $teamId = (int)($payload['team_id'] ?? 0);
     $discount = max(0, offline_api_num($payload['discount'] ?? 0));
     $receivedAmount = max(0, offline_api_num($payload['received_amount'] ?? 0));
@@ -217,6 +353,7 @@ function offline_api_create_order(PDO $pdo, array $user): void
     $paidNote = trim((string)($payload['paid_note'] ?? ''));
     $saleItemsRaw = is_array($payload['sale_items'] ?? null) ? $payload['sale_items'] : [];
     $purchaseItemsRaw = is_array($payload['purchase_items'] ?? null) ? $payload['purchase_items'] : [];
+    $keepImages = array_key_exists('keep_images', $payload) && is_array($payload['keep_images']) ? $payload['keep_images'] : null;
 
     if ($customerName === '' || $phone === '' || $customerLocation === '' || $teamId <= 0) {
         api_error('Customer name, phone, location, and team are required.', 422);
@@ -279,14 +416,33 @@ function offline_api_create_order(PDO $pdo, array $user): void
     $total = max(0, $subtotal - $discount - $purchaseTotal);
     $paidBackAmount = max(0, $purchaseTotal + $discount - $subtotal);
     $status = $total <= 0.009 ? 'paid' : 'unpaid';
+    $balance = max(0, $total - min($total, $receivedAmount));
+    if ($balance > 0.009) {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $dueDate)) {
+            api_error('Due date is required for partial or unpaid orders.', 422);
+        }
+        if ($dueDate < $saleDate) {
+            api_error('Due date cannot be before the sale date.', 422);
+        }
+        if ($collectionAssignedTo === '') {
+            api_error('Collection Assigned To is required for partial or unpaid orders.', 422);
+        }
+    } else {
+        $dueDate = '';
+        $collectionAssignedTo = '';
+    }
 
     try {
         $pdo->beginTransaction();
         $orderCode = offline_next_order_code($pdo);
         $userId = isset($user['id']) ? (int)$user['id'] : null;
-        $stmt = $pdo->prepare("INSERT INTO offline_sale_orders (order_code, customer_name, phone, customer_location, location_id, team_id, sale_date, status, subtotal, discount, purchase_total, total_amount, received_amount, payment_date, created_by, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)");
-        $stmt->execute([$orderCode, $customerName, $phone, $customerLocation, $locationId, $teamId, $saleDate, $status, $subtotal, $discount, $purchaseTotal, $total, $userId, $userId]);
+        $stmt = $pdo->prepare("INSERT INTO offline_sale_orders (order_code, customer_name, phone, customer_location, location_id, team_id, sale_date, due_date, collection_assigned_to, status, subtotal, discount, purchase_total, total_amount, received_amount, payment_date, created_by, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)");
+        $stmt->execute([$orderCode, $customerName, $phone, $customerLocation, $locationId, $teamId, $saleDate, $dueDate ?: null, $collectionAssignedTo ?: null, $status, $subtotal, $discount, $purchaseTotal, $total, $userId, $userId]);
         $orderId = (int)$pdo->lastInsertId();
+        $storedImages = offline_api_store_images([], $keepImages, $saleDate);
+        if ($storedImages !== '') {
+            $pdo->prepare('UPDATE offline_sale_orders SET images = ? WHERE id = ?')->execute([$storedImages, $orderId]);
+        }
         offline_log_order_activity($pdo, $orderId, 'created', 'Order created', $userId);
 
         $itemStmt = $pdo->prepare("INSERT INTO offline_sale_order_items (order_id, product_id, product_name, quantity, unit_price, line_total, unit_cost) VALUES (?, ?, ?, ?, ?, ?, ?)");
@@ -340,6 +496,8 @@ function offline_api_create_order(PDO $pdo, array $user): void
                 'received_amount' => $receivedAmount,
                 'balance_amount' => max(0, $total - $receivedAmount),
                 'paid_back_amount' => $paidBackAmount,
+                'images' => offline_api_parse_images($storedImages),
+                'image_urls' => offline_api_image_urls($storedImages),
             ],
         ]);
     } catch (Throwable $e) {
@@ -360,6 +518,11 @@ function offline_api_update_order(PDO $pdo, array $user): void
     $phone = trim((string)($payload['phone'] ?? ''));
     $customerLocation = trim((string)($payload['customer_location'] ?? ''));
     $saleDate = offline_api_date($payload['sale_date'] ?? null);
+    $dueDate = trim((string)($payload['due_date'] ?? ''));
+    $collectionAssignedTo = trim((string)($payload['collection_assigned_to'] ?? ''));
+    if (offline_api_text_length($collectionAssignedTo) > 255) {
+        api_error('Collection Assigned To cannot exceed 255 characters.', 422);
+    }
     $teamId = (int)($payload['team_id'] ?? 0);
     $discount = max(0, offline_api_num($payload['discount'] ?? 0));
     $targetReceivedAmount = max(0, offline_api_num($payload['received_amount'] ?? 0));
@@ -367,6 +530,7 @@ function offline_api_update_order(PDO $pdo, array $user): void
     $paidNote = trim((string)($payload['paid_note'] ?? ''));
     $saleItemsRaw = is_array($payload['sale_items'] ?? null) ? $payload['sale_items'] : [];
     $purchaseItemsRaw = is_array($payload['purchase_items'] ?? null) ? $payload['purchase_items'] : [];
+    $keepImages = array_key_exists('keep_images', $payload) && is_array($payload['keep_images']) ? $payload['keep_images'] : null;
 
     if ($orderId <= 0) {
         api_error('Invalid order.', 422);
@@ -420,7 +584,29 @@ function offline_api_update_order(PDO $pdo, array $user): void
         $purchaseItems[$key]['quantity'] += $qty;
     }
 
+    $subtotal = array_reduce($items, static fn(float $sum, array $item): float => $sum + ((float)$item['selling_price'] * (float)$item['quantity']), 0.0);
+    $purchaseTotal = array_reduce($purchaseItems, static fn(float $sum, array $item): float => $sum + ((float)$item['purchase_price'] * (float)$item['quantity']), 0.0);
+    $total = max(0, $subtotal - $discount - $purchaseTotal);
+    $balance = max(0, $total - min($total, $targetReceivedAmount));
+    if ($balance > 0.009) {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $dueDate)) {
+            api_error('Due date is required for partial or unpaid orders.', 422);
+        }
+        if ($dueDate < $saleDate) {
+            api_error('Due date cannot be before the sale date.', 422);
+        }
+        if ($collectionAssignedTo === '') {
+            api_error('Collection Assigned To is required for partial or unpaid orders.', 422);
+        }
+    } else {
+        $dueDate = '';
+        $collectionAssignedTo = '';
+    }
+
     try {
+        $imageStmt = $pdo->prepare('SELECT images FROM offline_sale_orders WHERE id = ? LIMIT 1');
+        $imageStmt->execute([$orderId]);
+        $existingImages = (string)($imageStmt->fetchColumn() ?: '');
         offline_update_sale_order(
             $pdo,
             $orderId,
@@ -430,6 +616,8 @@ function offline_api_update_order(PDO $pdo, array $user): void
             $locationId,
             $teamId,
             $saleDate,
+            $dueDate ?: null,
+            $collectionAssignedTo ?: null,
             $discount,
             $items,
             $purchaseItems,
@@ -438,6 +626,8 @@ function offline_api_update_order(PDO $pdo, array $user): void
             $paymentMethod ?: null,
             $paidNote ?: null
         );
+        $storedImages = offline_api_store_images($existingImages, $keepImages, $saleDate);
+        $pdo->prepare('UPDATE offline_sale_orders SET images = ? WHERE id = ?')->execute([$storedImages ?: null, $orderId]);
         api_json(['success' => true, 'message' => 'Order updated.']);
     } catch (Throwable $e) {
         api_error($e->getMessage(), 422);
@@ -502,6 +692,39 @@ function offline_api_cancel_order(PDO $pdo, array $user): void
     api_json(['success' => true, 'message' => 'Order cancelled and stock restored.']);
 }
 
+function offline_api_products(PDO $pdo): void
+{
+    require_role_or_permission(['admin'], 'sr_offline_orders.view', 'sr_offline_orders.create', 'offline_sales.view', 'offline_sales.create');
+    api_json([
+        'success' => true,
+        'products' => offline_api_product_options(offline_products($pdo)),
+    ]);
+}
+
+function offline_api_order_logs(PDO $pdo): void
+{
+    require_role_or_permission(['admin'], 'sr_offline_orders.view', 'sr_offline_orders.create', 'offline_sales.view', 'offline_sales.create');
+
+    $orderId = (int)($_GET['id'] ?? 0);
+    if ($orderId <= 0) {
+        api_error('Invalid order.', 422);
+    }
+
+    $logs = offline_logs_for_orders($pdo, [$orderId])[$orderId] ?? [];
+    api_json([
+        'success' => true,
+        'logs' => array_map(static function (array $log): array {
+            return [
+                'id' => (int)$log['id'],
+                'action' => (string)$log['action'],
+                'description' => (string)($log['description'] ?? ''),
+                'created_at' => (string)$log['created_at'],
+                'created_by_name' => (string)($log['created_by_name'] ?? ''),
+            ];
+        }, $logs),
+    ]);
+}
+
 try {
     $pdo = get_db_connection();
     offline_ensure_schema($pdo);
@@ -522,6 +745,12 @@ try {
     }
     if ($action === 'location_products') {
         offline_api_location_products($pdo);
+    }
+    if ($action === 'logs') {
+        offline_api_order_logs($pdo);
+    }
+    if ($action === 'products') {
+        offline_api_products($pdo);
     }
     offline_api_options($pdo);
 } catch (Throwable $e) {

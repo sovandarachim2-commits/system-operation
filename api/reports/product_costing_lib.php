@@ -108,7 +108,7 @@ function pc_history_log(
     $stmt->execute([
         $productId,
         $month,
-        $channel === 'offline' ? 'offline' : 'online',
+        in_array($channel, ['online', 'offline', 'dealer'], true) ? $channel : 'online',
         $action === 'create' ? 'create' : 'update',
         $selling,
         $original,

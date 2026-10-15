@@ -1,7 +1,49 @@
 <?php
 
+function offline_schema_is_current(PDO $pdo): bool
+{
+    try {
+        foreach ([
+            'offline_sale_orders',
+            'offline_sale_order_items',
+            'offline_sale_purchase_items',
+            'offline_sale_payments',
+            'offline_sale_order_logs',
+        ] as $table) {
+            if (!$pdo->query('SHOW TABLES LIKE ' . $pdo->quote($table))->fetchColumn()) {
+                return false;
+            }
+        }
+
+        $columns = array_column(
+            $pdo->query('SHOW COLUMNS FROM offline_sale_orders')->fetchAll(PDO::FETCH_ASSOC),
+            'Field'
+        );
+        foreach (['customer_location', 'team_id', 'received_amount', 'payment_date', 'due_date', 'collection_assigned_to', 'purchase_total', 'images'] as $column) {
+            if (!in_array($column, $columns, true)) {
+                return false;
+            }
+        }
+
+        $id = $pdo->query("SHOW COLUMNS FROM offline_sale_orders LIKE 'id'")->fetch(PDO::FETCH_ASSOC) ?: [];
+        if (!str_contains(strtolower((string)($id['Extra'] ?? '')), 'auto_increment')) {
+            return false;
+        }
+
+        return (bool)$pdo->query("SHOW COLUMNS FROM storage_locations LIKE 'is_offline_location'")->fetchColumn();
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
 function offline_ensure_schema(PDO $pdo): void
 {
+    static $done = false;
+    if ($done || offline_schema_is_current($pdo)) {
+        $done = true;
+        return;
+    }
+
     $pdo->exec("
         CREATE TABLE IF NOT EXISTS offline_sale_orders (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -16,6 +58,9 @@ function offline_ensure_schema(PDO $pdo): void
             subtotal DECIMAL(12,2) NOT NULL DEFAULT 0,
             discount DECIMAL(12,2) NOT NULL DEFAULT 0,
             total_amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+            due_date DATE NULL,
+            collection_assigned_to VARCHAR(255) NULL,
+            images TEXT NULL,
             cancel_note VARCHAR(255) NULL,
             created_by INT NULL,
             updated_by INT NULL,
@@ -23,6 +68,7 @@ function offline_ensure_schema(PDO $pdo): void
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_location_id (location_id),
             INDEX idx_sale_date (sale_date),
+            INDEX idx_due_date (due_date),
             INDEX idx_status (status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     ");
@@ -68,6 +114,7 @@ function offline_ensure_schema(PDO $pdo): void
     offline_ensure_payments_schema($pdo);
     offline_ensure_order_logs_schema($pdo);
     offline_ensure_auto_increment_ids($pdo);
+    $done = true;
 }
 
 /**
@@ -234,9 +281,22 @@ function offline_ensure_sellers_schema(PDO $pdo): void
         if (!$hasPaymentDate) {
             $pdo->exec("ALTER TABLE offline_sale_orders ADD COLUMN payment_date DATE NULL AFTER received_amount");
         }
+        $hasDueDate = (bool)$pdo->query("SHOW COLUMNS FROM offline_sale_orders LIKE 'due_date'")->fetchColumn();
+        if (!$hasDueDate) {
+            $pdo->exec("ALTER TABLE offline_sale_orders ADD COLUMN due_date DATE NULL AFTER payment_date");
+            $pdo->exec("ALTER TABLE offline_sale_orders ADD INDEX idx_due_date (due_date)");
+        }
+        $hasCollectionAssignee = (bool)$pdo->query("SHOW COLUMNS FROM offline_sale_orders LIKE 'collection_assigned_to'")->fetchColumn();
+        if (!$hasCollectionAssignee) {
+            $pdo->exec("ALTER TABLE offline_sale_orders ADD COLUMN collection_assigned_to VARCHAR(255) NULL AFTER due_date");
+        }
         $hasPurchaseTotal = (bool)$pdo->query("SHOW COLUMNS FROM offline_sale_orders LIKE 'purchase_total'")->fetchColumn();
         if (!$hasPurchaseTotal) {
             $pdo->exec("ALTER TABLE offline_sale_orders ADD COLUMN purchase_total DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER discount");
+        }
+        $hasImages = (bool)$pdo->query("SHOW COLUMNS FROM offline_sale_orders LIKE 'images'")->fetchColumn();
+        if (!$hasImages) {
+            $pdo->exec("ALTER TABLE offline_sale_orders ADD COLUMN images TEXT NULL AFTER collection_assigned_to");
         }
     } catch (Throwable $e) {
         error_log('offline_ensure_sellers_schema: ' . $e->getMessage());
@@ -732,7 +792,9 @@ function offline_sync_order_payment_totals(PDO $pdo, int $orderId, ?int $updated
 
     $update = $pdo->prepare("
         UPDATE offline_sale_orders
-        SET status = ?, received_amount = ?, payment_date = ?, payment_method = ?, paid_note = ?, updated_at = NOW()" . ($updatedBy !== null ? ', updated_by = ?' : '') . "
+        SET status = ?, received_amount = ?, payment_date = ?, payment_method = ?, paid_note = ?,
+            due_date = CASE WHEN ? = 'paid' THEN NULL ELSE due_date END,
+            updated_at = NOW()" . ($updatedBy !== null ? ', updated_by = ?' : '') . "
         WHERE id = ?
     ");
     $params = [
@@ -741,6 +803,7 @@ function offline_sync_order_payment_totals(PDO $pdo, int $orderId, ?int $updated
         $lastPaymentDate ?: null,
         $latest['payment_method'] ?? null,
         $latest['paid_note'] ?? null,
+        $status,
     ];
     if ($updatedBy !== null) {
         $params[] = $updatedBy;
@@ -1196,6 +1259,8 @@ function offline_update_sale_order(
     int $locationId,
     ?int $teamId,
     string $saleDate,
+    ?string $dueDate,
+    ?string $collectionAssignedTo,
     float $discount,
     array $items,
     array $purchaseItems,
@@ -1369,7 +1434,7 @@ function offline_update_sale_order(
         $upd = $pdo->prepare("
             UPDATE offline_sale_orders
             SET customer_name = ?, phone = ?, customer_location = ?, location_id = ?, team_id = ?,
-                sale_date = ?, subtotal = ?, discount = ?, purchase_total = ?, total_amount = ?, updated_by = ?, updated_at = NOW()
+                sale_date = ?, due_date = ?, collection_assigned_to = ?, subtotal = ?, discount = ?, purchase_total = ?, total_amount = ?, updated_by = ?, updated_at = NOW()
             WHERE id = ?
         ");
         $upd->execute([
@@ -1379,6 +1444,8 @@ function offline_update_sale_order(
             $locationId,
             $teamId,
             $saleDate,
+            $dueDate,
+            $collectionAssignedTo,
             $subtotal,
             $discount,
             $purchaseTotal,

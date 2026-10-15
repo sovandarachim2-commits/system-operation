@@ -800,6 +800,18 @@ function status_kh(string $s): string {
                     $<?= number_format($balanceDue, 2) ?>
                 </span>
             </div>
+            <?php if ($balanceDue > 0 && !empty($order['due_date'])): ?>
+            <div class="pay-row">
+                <span class="pay-label" style="font-size:14px;">Due Date</span>
+                <span class="pay-val" style="font-size:14px;color:#dc3545;"><?= htmlspecialchars(fd($order['due_date'])) ?></span>
+            </div>
+            <?php endif; ?>
+            <?php if ($balanceDue > 0 && !empty($order['collection_assigned_to'])): ?>
+            <div class="pay-row">
+                <span class="pay-label" style="font-size:14px;">Collection Assigned To</span>
+                <span class="pay-val" style="font-size:14px;"><?= htmlspecialchars($order['collection_assigned_to']) ?></span>
+            </div>
+            <?php endif; ?>
             <div class="pay-row">
                 <span class="label-col" style="font-family:'Noto Sans Khmer',sans-serif;">ត្រូវ​បង់ (រៀល)</span>
                 <span class="fw-bold" style="font-size:16px;color:black;font-family:'Noto Sans Khmer',sans-serif;">
@@ -856,6 +868,12 @@ function status_kh(string $s): string {
                 <table class="inv-info-tbl">
                     <tr><td><span class="lbl-km">លេខវិក្កយបត្រ</span><span class="lbl-en">Invoice No</span></td><td><?= htmlspecialchars($order['order_code']) ?></td></tr>
                     <tr><td><span class="lbl-km">កាលបរិច្ឆេទ</span><span class="lbl-en">Date</span></td><td><?= htmlspecialchars(fd($order['sale_date'] ?? null)) ?></td></tr>
+                    <?php if ($balanceDue > 0 && !empty($order['due_date'])): ?>
+                    <tr><td><span class="lbl-km">ថ្ងៃផុតកំណត់</span><span class="lbl-en">Due Date</span></td><td><?= htmlspecialchars(fd($order['due_date'])) ?></td></tr>
+                    <?php endif; ?>
+                    <?php if ($balanceDue > 0 && !empty($order['collection_assigned_to'])): ?>
+                    <tr><td><span class="lbl-en">Collection Assigned To</span></td><td><?= htmlspecialchars($order['collection_assigned_to']) ?></td></tr>
+                    <?php endif; ?>
                     <tr><td><span class="lbl-km">អតិថិជន</span><span class="lbl-en">Customer</span></td><td><?= htmlspecialchars($order['customer_name'] ?: '—') ?></td></tr>
                     <tr><td><span class="lbl-km">ទូរស័ព្ទ</span><span class="lbl-en">Phone</span></td><td><?= htmlspecialchars($order['phone'] ?: '—') ?></td></tr>
                     <tr><td><span class="lbl-km">អាសយដ្ឋាន</span><span class="lbl-en">Address</span></td><td><?= htmlspecialchars($order['customer_location'] ?: '—') ?></td></tr>

@@ -2,7 +2,18 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/bootstrap.php';
-require_role_or_permission(['admin'], 'sr_month_end_closing.view', 'sr_income_statement.view', 'sr_bank_balances.view', 'sr_inventory_closing.view');
+$mecAccessPayload = json_decode(file_get_contents('php://input') ?: '{}', true);
+$mecAccessAction = is_array($mecAccessPayload) ? (string)($mecAccessPayload['action'] ?? '') : '';
+$GLOBALS['MEC_ACCESS_PAYLOAD'] = is_array($mecAccessPayload) ? $mecAccessPayload : [];
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && ($_GET['view'] ?? '') === 'unlock_requests') {
+    require_role_or_permission(['admin'], 'sr_unlock_requests.view');
+} elseif (in_array($mecAccessAction, ['approve_unlock_request', 'reject_unlock_request'], true)) {
+    require_role_or_permission(['admin'], 'sr_unlock_requests.approve');
+} elseif ($mecAccessAction === 'reopen') {
+    require_role_or_permission(['admin'], 'sr_month_end_closing.approve');
+} else {
+    require_role_or_permission(['admin'], 'sr_month_end_closing.view', 'sr_income_statement.view', 'sr_bank_balances.view', 'sr_inventory_closing.view');
+}
 
 const MEC_STEPS = [
     'sales' => 'Sales Closing',
@@ -19,6 +30,9 @@ const MEC_STEPS = [
 
 function mec_payload(): array
 {
+    if (isset($GLOBALS['MEC_ACCESS_PAYLOAD']) && is_array($GLOBALS['MEC_ACCESS_PAYLOAD'])) {
+        return $GLOBALS['MEC_ACCESS_PAYLOAD'];
+    }
     $raw = file_get_contents('php://input') ?: '';
     $payload = json_decode($raw, true);
     return is_array($payload) ? $payload : [];
@@ -52,6 +66,17 @@ function mec_current_user_id(): ?int
     $user = function_exists('current_user') ? (current_user() ?: []) : [];
     $id = (int)($user['id'] ?? 0);
     return $id > 0 ? $id : null;
+}
+
+function mec_can_manage_unlock_requests(): bool
+{
+    $user = function_exists('current_user') ? (current_user() ?: []) : [];
+    return (($user['username'] ?? '') === 'admin')
+        || (strtolower((string)($user['role'] ?? '')) === 'admin')
+        || (function_exists('has_permission') && (
+            has_permission('sr_unlock_requests.approve')
+            || has_permission('sr_month_end_closing.close')
+        ));
 }
 
 function mec_user_name(PDO $pdo, mixed $id): string
@@ -521,6 +546,23 @@ function mec_ensure_schema(PDO $pdo): void
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_month_log_closing (closing_id),
         CONSTRAINT fk_month_log_closing FOREIGN KEY (closing_id) REFERENCES month_end_closings(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    $pdo->exec("CREATE TABLE IF NOT EXISTS month_end_unlock_requests (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        closing_id INT NOT NULL,
+        step_key VARCHAR(40) NOT NULL,
+        reason VARCHAR(255) NOT NULL,
+        note TEXT NOT NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'pending',
+        requested_by INT NULL,
+        reviewed_by INT NULL,
+        reviewed_at DATETIME NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_unlock_request_status (status),
+        INDEX idx_unlock_request_closing_step (closing_id, step_key),
+        CONSTRAINT fk_unlock_request_closing FOREIGN KEY (closing_id) REFERENCES month_end_closings(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 }
 
@@ -2649,11 +2691,75 @@ try {
         $savedSteps = mec_fetch_rows($pdo, 'SELECT * FROM month_end_closing_steps WHERE closing_id = ?', [$closingId]);
         $rows = mec_merge_actuals($rows, $savedSteps);
 
-        if ((string)$closing['status'] === 'CLOSED' && !in_array($action, ['reopen'], true)) {
-            api_error(date('F Y', strtotime($month . '-01')) . ' is closed. Transactions for this accounting period cannot be modified.', 409);
+        if ((string)$closing['status'] === 'CLOSED' && $action !== 'reopen') {
+            api_error(date('F Y', strtotime($month . '-01')) . ' is permanently locked and cannot be modified.', 409);
+        }
+
+        if ($action === 'request_unlock') {
+            $key = trim((string)($payload['step_key'] ?? ''));
+            $lockable = ['sales', 'receivable', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
+            if (!in_array($key, $lockable, true)) {
+                api_error('This step cannot be unlocked.', 422);
+            }
+            $saved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === $key) $saved = $savedStep;
+            }
+            if (strtoupper((string)($saved['status'] ?? '')) !== 'LOCKED') {
+                api_error('This step is not locked.', 409);
+            }
+            $reason = trim((string)($payload['reason'] ?? ''));
+            $note = trim((string)($payload['note'] ?? ''));
+            if ($reason === '') api_error('Unlock reason is required.', 422);
+            if ($note === '') api_error('Unlock note is required.', 422);
+            $duplicate = $pdo->prepare("SELECT id FROM month_end_unlock_requests WHERE closing_id = ? AND step_key = ? AND status = 'pending' LIMIT 1");
+            $duplicate->execute([$closingId, $key]);
+            if ($duplicate->fetchColumn()) {
+                api_error('An unlock request for this step is already waiting for manager approval.', 409);
+            }
+            $stmt = $pdo->prepare("INSERT INTO month_end_unlock_requests (closing_id, step_key, reason, note, status, requested_by) VALUES (?, ?, ?, ?, 'pending', ?)");
+            $stmt->execute([$closingId, $key, $reason, $note, $userId]);
+            mec_log($pdo, $closingId, $key, 'unlock_requested', $reason . ' — ' . $note, ['request_id' => (int)$pdo->lastInsertId()]);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'approve_unlock_request' || $action === 'reject_unlock_request') {
+            if (!mec_can_manage_unlock_requests()) {
+                api_error('Month-End Closing close permission is required.', 403);
+            }
+            $requestId = (int)($payload['request_id'] ?? 0);
+            $stmt = $pdo->prepare("SELECT * FROM month_end_unlock_requests WHERE id = ? AND closing_id = ? LIMIT 1");
+            $stmt->execute([$requestId, $closingId]);
+            $request = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            if (!$request) api_error('Unlock request not found.', 404);
+            if (strtolower((string)($request['status'] ?? '')) !== 'pending') {
+                api_error('This unlock request has already been reviewed.', 409);
+            }
+            $key = (string)$request['step_key'];
+            if ($action === 'reject_unlock_request') {
+                $pdo->prepare("UPDATE month_end_unlock_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$userId, $requestId]);
+                mec_log($pdo, $closingId, $key, 'unlock_request_rejected', (string)$request['note'], ['request_id' => $requestId]);
+                mec_response($pdo, $month);
+            }
+            $pdo->beginTransaction();
+            $step = $pdo->prepare("UPDATE month_end_closing_steps SET status = 'NEEDS_REVIEW', note = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP, reviewed_by = NULL, reviewed_at = NULL WHERE closing_id = ? AND step_key = ? AND status = 'LOCKED'");
+            $step->execute([(string)$request['note'], $userId, $closingId, $key]);
+            if ($step->rowCount() !== 1) {
+                $pdo->rollBack();
+                api_error('This step is no longer locked.', 409);
+            }
+            $pdo->prepare("UPDATE month_end_closings SET final_approval_status = 'Pending', reports_generated_at = NULL, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$userId, $closingId]);
+            $pdo->prepare("UPDATE month_end_closing_steps SET status = 'NEEDS_REVIEW', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE closing_id = ? AND step_key = 'final_review' AND status = 'REVIEWED'")->execute([$userId, $closingId]);
+            $pdo->prepare("UPDATE month_end_unlock_requests SET status = 'approved', reviewed_by = ?, reviewed_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE id = ?")->execute([$userId, $requestId]);
+            mec_log($pdo, $closingId, $key, 'unlock_request_approved', (string)$request['reason'] . ' — ' . (string)$request['note'], ['request_id' => $requestId]);
+            $pdo->commit();
+            mec_response($pdo, $month);
         }
 
         if ($action === 'unlock_step') {
+            if (!mec_can_manage_unlock_requests()) {
+                api_error('Month-End Closing close permission is required.', 403);
+            }
             $key = trim((string)($payload['step_key'] ?? ''));
             $lockable = ['sales', 'receivable', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
             if (!in_array($key, $lockable, true)) {
@@ -2923,6 +3029,7 @@ try {
             $stmt = $pdo->prepare("UPDATE month_end_closings SET status = 'CLOSED', final_note = ?, closed_by = ?, closed_at = NOW(), updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
             $stmt->execute([$note, $userId, $userId, $closingId]);
             $pdo->prepare("UPDATE month_end_closing_steps SET status = 'LOCKED', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE closing_id = ?")->execute([$userId, $closingId]);
+            $pdo->prepare("UPDATE month_end_unlock_requests SET status = 'cancelled', reviewed_by = ?, reviewed_at = NOW(), updated_at = CURRENT_TIMESTAMP WHERE closing_id = ? AND status = 'pending'")->execute([$userId, $closingId]);
             mec_log($pdo, $closingId, null, 'close', $note);
             mec_response($pdo, $month);
         }
@@ -2930,14 +3037,50 @@ try {
         if ($action === 'reopen') {
             $reason = trim((string)($payload['reason'] ?? ''));
             if ($reason === '') api_error('Reopen reason is required.', 422);
+            if ((string)$closing['status'] !== 'CLOSED') {
+                api_error('This month is not locked.', 409);
+            }
             $stmt = $pdo->prepare("UPDATE month_end_closings SET status = 'REOPENED', closing_version = closing_version + 1, final_approval_status = 'Pending', reports_generated_at = NULL, reopened_by = ?, reopened_at = NOW(), reopen_reason = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
             $stmt->execute([$userId, $reason, $userId, $closingId]);
-            $pdo->prepare("UPDATE month_end_closing_steps SET status = CASE WHEN step_key = 'final_review' THEN 'LOCKED' ELSE 'NEEDS_REVIEW' END, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE closing_id = ?")->execute([$userId, $closingId]);
-            mec_log($pdo, $closingId, null, 'reopen', $reason);
+            mec_log($pdo, $closingId, null, 'reopen_month', $reason, ['steps_remain_locked' => true]);
             mec_response($pdo, $month);
         }
 
         api_error('Unknown action.', 422);
+    }
+
+    if (($_GET['view'] ?? '') === 'unlock_requests') {
+        $params = [];
+        $where = '';
+        if (!mec_can_manage_unlock_requests()) {
+            $where = 'WHERE r.requested_by = ?';
+            $params[] = mec_current_user_id();
+        }
+        $requests = mec_fetch_rows($pdo, "
+            SELECT
+                r.id AS request_id,
+                DATE_FORMAT(c.closing_month, '%Y-%m') AS month,
+                r.step_key,
+                COALESCE(NULLIF(req.name, ''), req.username, '') AS requester_name,
+                r.reason,
+                r.note,
+                r.status,
+                r.created_at,
+                COALESCE(NULLIF(rev.name, ''), rev.username, '') AS reviewed_by,
+                r.reviewed_at
+            FROM month_end_unlock_requests r
+            INNER JOIN month_end_closings c ON c.id = r.closing_id
+            LEFT JOIN users req ON req.id = r.requested_by
+            LEFT JOIN users rev ON rev.id = r.reviewed_by
+            {$where}
+            ORDER BY CASE r.status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, r.created_at DESC, r.id DESC
+            LIMIT 500
+        ", $params);
+        foreach ($requests as &$request) {
+            $request['step_title'] = MEC_STEPS[(string)($request['step_key'] ?? '')] ?? (string)($request['step_key'] ?? '');
+        }
+        unset($request);
+        api_json(['success' => true, 'unlock_requests' => $requests]);
     }
 
     if (($_GET['view'] ?? '') === 'sales_orders') {
