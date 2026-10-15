@@ -107,6 +107,33 @@ function offline_api_upload_images(?string $date = null): array
     return $saved;
 }
 
+function offline_api_has_valid_image_upload(): bool
+{
+    $files = $_FILES['images'] ?? null;
+    if (!$files) {
+        return false;
+    }
+
+    $names = is_array($files['name'] ?? null) ? $files['name'] : [$files['name'] ?? ''];
+    $errors = is_array($files['error'] ?? null) ? $files['error'] : [$files['error'] ?? UPLOAD_ERR_NO_FILE];
+    $sizes = is_array($files['size'] ?? null) ? $files['size'] : [$files['size'] ?? 0];
+
+    foreach ($names as $index => $name) {
+        $extension = strtolower(pathinfo((string)$name, PATHINFO_EXTENSION));
+        $size = (int)($sizes[$index] ?? 0);
+        if (
+            (int)($errors[$index] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_OK
+            && in_array($extension, ['jpg', 'jpeg', 'png', 'webp', 'gif'], true)
+            && $size > 0
+            && $size <= 5 * 1024 * 1024
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function offline_api_store_images($existing, $keep, ?string $date = null): string
 {
     $current = offline_api_parse_images($existing);
@@ -358,6 +385,9 @@ function offline_api_create_order(PDO $pdo, array $user): void
     if ($customerName === '' || $phone === '' || $customerLocation === '' || $teamId <= 0) {
         api_error('Customer name, phone, location, and team are required.', 422);
     }
+    if (!offline_api_has_valid_image_upload()) {
+        api_error('At least one order image is required.', 422);
+    }
     if ($receivedAmount > 0 && $paymentMethod === '') {
         api_error('Payment method is required when received amount is greater than zero.', 422);
     }
@@ -440,9 +470,10 @@ function offline_api_create_order(PDO $pdo, array $user): void
         $stmt->execute([$orderCode, $customerName, $phone, $customerLocation, $locationId, $teamId, $saleDate, $dueDate ?: null, $collectionAssignedTo ?: null, $status, $subtotal, $discount, $purchaseTotal, $total, $userId, $userId]);
         $orderId = (int)$pdo->lastInsertId();
         $storedImages = offline_api_store_images([], $keepImages, $saleDate);
-        if ($storedImages !== '') {
-            $pdo->prepare('UPDATE offline_sale_orders SET images = ? WHERE id = ?')->execute([$storedImages, $orderId]);
+        if ($storedImages === '') {
+            throw new RuntimeException('The order image could not be saved.');
         }
+        $pdo->prepare('UPDATE offline_sale_orders SET images = ? WHERE id = ?')->execute([$storedImages, $orderId]);
         offline_log_order_activity($pdo, $orderId, 'created', 'Order created', $userId);
 
         $itemStmt = $pdo->prepare("INSERT INTO offline_sale_order_items (order_id, product_id, product_name, quantity, unit_price, line_total, unit_cost) VALUES (?, ?, ?, ?, ?, ?, ?)");
