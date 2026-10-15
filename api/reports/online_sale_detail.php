@@ -25,8 +25,9 @@ try {
         api_error('Order ID is required.', 422);
     }
 
+    $rbacEnabled = function_exists('rbac_is_enabled') && rbac_is_enabled($pdo);
     $canEditAnyOrder = ($user['role'] ?? '') === 'admin'
-        || (function_exists('rbac_is_enabled') && rbac_is_enabled($pdo) && has_permission('orders.update'));
+        || ($rbacEnabled && (has_permission('orders.update') || has_permission('sr_orders.update')));
 
     $sql = '
         SELECT
