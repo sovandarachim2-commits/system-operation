@@ -425,6 +425,183 @@ function ft_day_before(string $date): string
     return $timestamp ? date('Y-m-d', $timestamp) : $date;
 }
 
+function ft_history_ensure(PDO $pdo): void
+{
+    $pdo->exec("CREATE TABLE IF NOT EXISTS finance_topup_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        topup_id INT NOT NULL,
+        action VARCHAR(40) NOT NULL,
+        details TEXT NULL,
+        user_id INT NULL,
+        user_name VARCHAR(150) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_fth_topup (topup_id),
+        INDEX idx_fth_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+}
+
+function ft_history_user_name(?array $user): string
+{
+    if (!$user) {
+        return 'System';
+    }
+    $name = trim((string)($user['name'] ?? ''));
+    if ($name !== '') {
+        return $name;
+    }
+    $username = trim((string)($user['username'] ?? ''));
+    return $username !== '' ? $username : 'System';
+}
+
+function ft_history_snapshot(array $row): array
+{
+    return [
+        'amount' => number_format((float)($row['amount'] ?? 0), 2, '.', ''),
+        'source' => trim((string)($row['source'] ?? '')),
+        'person_name' => trim((string)($row['person_name'] ?? '')),
+        'status' => ft_topup_status((string)($row['status'] ?? 'completed')),
+        'topup_date' => trim((string)($row['topup_date'] ?? '')),
+        'description' => trim((string)($row['description'] ?? '')),
+        'receipt' => trim((string)($row['receipt_image'] ?? '')) !== '' ? 'Yes' : 'No',
+    ];
+}
+
+function ft_history_details(string $action, array $before, array $after): string
+{
+    $labels = [
+        'amount' => 'Amount',
+        'source' => 'Source',
+        'person_name' => 'Person',
+        'status' => 'Status',
+        'topup_date' => 'Date',
+        'description' => 'Description',
+        'receipt' => 'Receipt',
+    ];
+    $parts = [];
+    foreach ($labels as $key => $label) {
+        $old = (string)($before[$key] ?? '');
+        $new = (string)($after[$key] ?? '');
+        if ($action === 'Created') {
+            $parts[] = $label . ': ' . ($new !== '' ? $new : '-');
+            continue;
+        }
+        if ($old !== $new) {
+            $parts[] = $label . ': ' . ($old !== '' ? $old : '-') . ' → ' . ($new !== '' ? $new : '-');
+        }
+    }
+    if ($action === 'Deleted' && !$parts) {
+        foreach ($labels as $key => $label) {
+            $old = (string)($before[$key] ?? '');
+            $parts[] = $label . ': ' . ($old !== '' ? $old : '-');
+        }
+    }
+    return $parts ? implode('; ', $parts) : 'No field changes';
+}
+
+function ft_history_log(PDO $pdo, int $topupId, string $action, string $details, ?array $user = null, ?string $createdAt = null): void
+{
+    if ($topupId <= 0) {
+        return;
+    }
+    try {
+        ft_history_ensure($pdo);
+        $userId = ($user && isset($user['id'])) ? (int)$user['id'] : null;
+        if ($userId !== null && $userId <= 0) {
+            $userId = null;
+        }
+        $stmt = $pdo->prepare('
+            INSERT INTO finance_topup_history
+                (topup_id, action, details, user_id, user_name, created_at)
+            VALUES (?, ?, ?, ?, ?, COALESCE(?, NOW()))
+        ');
+        $stmt->execute([
+            $topupId,
+            $action,
+            $details !== '' ? $details : null,
+            $userId,
+            ft_history_user_name($user),
+            $createdAt,
+        ]);
+    } catch (Throwable $e) {
+        error_log('ft_history_log failed: ' . $e->getMessage());
+    }
+}
+
+function ft_history_list(PDO $pdo, int $topupId): array
+{
+    if ($topupId <= 0) {
+        return [];
+    }
+    ft_history_ensure($pdo);
+    $hasUsers = api_table_exists($pdo, 'users');
+    $userNameSql = $hasUsers
+        ? "COALESCE(NULLIF(u.name, ''), NULLIF(u.username, ''), NULLIF(h.user_name, ''), 'System')"
+        : "COALESCE(NULLIF(h.user_name, ''), 'System')";
+    $userJoinSql = $hasUsers ? 'LEFT JOIN users u ON u.id = h.user_id' : '';
+    $stmt = $pdo->prepare("
+        SELECT
+            h.id,
+            h.action,
+            h.details,
+            h.user_id,
+            {$userNameSql} AS user_name,
+            h.created_at
+        FROM finance_topup_history h
+        {$userJoinSql}
+        WHERE h.topup_id = ?
+        ORDER BY h.created_at ASC, h.id ASC
+    ");
+    $stmt->execute([$topupId]);
+    $rows = [];
+    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $rows[] = [
+            'id' => (int)($row['id'] ?? 0),
+            'action' => (string)($row['action'] ?? ''),
+            'details' => (string)($row['details'] ?? ''),
+            'user' => (string)($row['user_name'] ?? 'System'),
+            'user_id' => isset($row['user_id']) ? (int)$row['user_id'] : null,
+            'date' => (string)($row['created_at'] ?? ''),
+        ];
+    }
+    return $rows;
+}
+
+function ft_history_bootstrap(PDO $pdo, array $row): array
+{
+    $topupId = (int)($row['id'] ?? 0);
+    if ($topupId <= 0) {
+        return [];
+    }
+    ft_history_ensure($pdo);
+    $countStmt = $pdo->prepare('SELECT COUNT(*) FROM finance_topup_history WHERE topup_id = ?');
+    $countStmt->execute([$topupId]);
+    if ((int)$countStmt->fetchColumn() > 0) {
+        return ft_history_list($pdo, $topupId);
+    }
+
+    $createdName = trim((string)($row['created_by_name'] ?? $row['created_by'] ?? 'System'));
+    $createdUser = [
+        'id' => is_numeric($row['created_by'] ?? null) ? (int)$row['created_by'] : null,
+        'name' => $createdName !== '' ? $createdName : 'System',
+    ];
+    $createdAt = trim((string)($row['created_at'] ?? '')) ?: date('Y-m-d H:i:s');
+    ft_history_log(
+        $pdo,
+        $topupId,
+        'Created',
+        ft_history_details('Created', [], ft_history_snapshot($row)),
+        $createdUser,
+        $createdAt
+    );
+
+    $updatedAt = trim((string)($row['updated_at'] ?? ''));
+    if ($updatedAt !== '' && $updatedAt !== $createdAt) {
+        ft_history_log($pdo, $topupId, 'Updated', 'Top-up record updated', $createdUser, $updatedAt);
+    }
+
+    return ft_history_list($pdo, $topupId);
+}
+
 function ft_serialize_row(array $item): array
 {
     $receipt = (string)($item['receipt_image'] ?? '');
@@ -518,7 +695,23 @@ try {
                 (amount, source, description, topup_date, receipt_image, person_name, status, created_at, created_by)
                 VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)');
             $stmt->execute([$amount, $source, $description, $topupDate, $receipt, $personName, $status, $createdBy]);
-            api_json(['success' => true, 'message' => 'Top-up saved.', 'id' => (string)$pdo->lastInsertId()]);
+            $newId = (int)$pdo->lastInsertId();
+            ft_history_log(
+                $pdo,
+                $newId,
+                'Created',
+                ft_history_details('Created', [], ft_history_snapshot([
+                    'amount' => $amount,
+                    'source' => $source,
+                    'description' => $description,
+                    'person_name' => $personName,
+                    'status' => $status,
+                    'topup_date' => $topupDate,
+                    'receipt_image' => $receipt,
+                ])),
+                $user
+            );
+            api_json(['success' => true, 'message' => 'Top-up saved.', 'id' => (string)$newId]);
         }
 
         if ($action === 'update') {
@@ -544,12 +737,13 @@ try {
             if ($personName === '') {
                 api_error('Person name is required.', 422);
             }
-            $stmt = $pdo->prepare('SELECT receipt_image FROM finance_topups WHERE id = ?');
+            $stmt = $pdo->prepare('SELECT * FROM finance_topups WHERE id = ?');
             $stmt->execute([$id]);
-            $oldReceipt = $stmt->fetchColumn();
-            if ($oldReceipt === false) {
+            $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$existing) {
                 api_error('Top-up record not found.', 404);
             }
+            $oldReceipt = $existing['receipt_image'] ?? null;
             $receipt = ft_handle_receipt_upload($topupDate);
             $fields = ['amount = ?', 'source = ?', 'description = ?', 'topup_date = ?', 'person_name = ?', 'status = ?', 'updated_at = CURRENT_TIMESTAMP'];
             $params = [$amount, $source, $description, $topupDate, $personName, $status];
@@ -560,6 +754,19 @@ try {
             }
             $params[] = $id;
             $pdo->prepare('UPDATE finance_topups SET ' . implode(', ', $fields) . ' WHERE id = ?')->execute($params);
+            $after = [
+                'amount' => $amount,
+                'source' => $source,
+                'description' => $description,
+                'person_name' => $personName,
+                'status' => $status,
+                'topup_date' => $topupDate,
+                'receipt_image' => $receipt ?: ($existing['receipt_image'] ?? ''),
+            ];
+            $details = ft_history_details('Updated', ft_history_snapshot($existing), ft_history_snapshot($after));
+            if ($details !== 'No field changes') {
+                ft_history_log($pdo, $id, 'Updated', $details, $user);
+            }
             api_json(['success' => true, 'message' => 'Top-up updated.']);
         }
 
@@ -590,12 +797,43 @@ try {
             if ($newBalance < -1000) {
                 api_error('Cannot delete this top-up because the balance would go below -$1,000.', 422);
             }
+            ft_history_log(
+                $pdo,
+                $id,
+                'Deleted',
+                ft_history_details('Deleted', ft_history_snapshot($topup), []),
+                $user
+            );
             upload_delete_local_file($topup['receipt_image'] ?? null, 'receipts');
             $pdo->prepare('DELETE FROM finance_topups WHERE id = ?')->execute([$id]);
             api_json(['success' => true, 'message' => 'Top-up deleted.']);
         }
 
         api_error('Unsupported action.', 422);
+    }
+
+    if (trim((string)($_GET['action'] ?? '')) === 'history') {
+        $historyId = (int)($_GET['id'] ?? 0);
+        if ($historyId <= 0) {
+            api_error('Invalid top-up ID.', 422);
+        }
+        $historyStmt = $pdo->prepare('SELECT * FROM finance_topups WHERE id = ? LIMIT 1');
+        $historyStmt->execute([$historyId]);
+        $historyRow = $historyStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$historyRow) {
+            api_error('Top-up record not found.', 404);
+        }
+        $createdBy = trim((string)($historyRow['created_by'] ?? ''));
+        if ($createdBy !== '' && api_table_exists($pdo, 'users')) {
+            $userStmt = $pdo->prepare('SELECT name, username FROM users WHERE id = ? OR username = ? LIMIT 1');
+            $userStmt->execute([is_numeric($createdBy) ? (int)$createdBy : 0, $createdBy]);
+            $creator = $userStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            $historyRow['created_by_name'] = trim((string)($creator['name'] ?? '')) ?: trim((string)($creator['username'] ?? '')) ?: $createdBy;
+        }
+        api_json([
+            'success' => true,
+            'history' => ft_history_bootstrap($pdo, $historyRow),
+        ]);
     }
 
     $from = ft_date($_GET['from'] ?? $_GET['from_date'] ?? $_GET['start_date'] ?? null, date('Y-m-01'));

@@ -545,8 +545,6 @@ function opc_save(PDO $pdo): void
 
     pc_history_log($pdo, $productId, $month, 'offline', $action, $selling, $original, $supplier, $shipping, $other, $marketing, $commission, $notes, $userId);
 
-    $pdo->prepare('UPDATE products SET cost = ? WHERE id = ?')->execute([$selling, $productId]);
-
     api_json(['success' => true, 'message' => 'Product cost saved.']);
 }
 

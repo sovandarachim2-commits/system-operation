@@ -8,6 +8,7 @@ header('Content-Type: application/json; charset=utf-8');
 
 try {
     $pdo = get_db_connection();
+    productHistoryEnsureSchema($pdo);
     $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
     $action = trim((string)($_GET['action'] ?? $_POST['action'] ?? ''));
 
@@ -19,6 +20,53 @@ try {
 } catch (Throwable $e) {
     error_log('product_management API error: ' . $e->getMessage());
     api_error('Unable to load product management data.', 500);
+}
+
+function productHistoryEnsureSchema(PDO $pdo): void
+{
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS product_management_history (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            product_id INT NOT NULL,
+            action VARCHAR(20) NOT NULL DEFAULT 'update',
+            details TEXT NULL,
+            updated_by INT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_pmh_product (product_id),
+            INDEX idx_pmh_created (created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ");
+}
+
+function productHistoryLog(PDO $pdo, int $productId, string $action, array $before, array $after, ?int $userId): void
+{
+    $labels = [
+        'product_name' => 'Product Name',
+        'selling_price' => 'Selling Price',
+        'brand_id' => 'Brand',
+    ];
+    $fields = [];
+    foreach ($labels as $key => $label) {
+        $old = $before[$key] ?? null;
+        $new = $after[$key] ?? null;
+        if ($action === 'create' || (string)$old !== (string)$new) {
+            $fields[$key] = ['label' => $label, 'old' => $old, 'new' => $new];
+        }
+    }
+    if ($action !== 'create' && !$fields) {
+        return;
+    }
+
+    $stmt = $pdo->prepare('
+        INSERT INTO product_management_history (product_id, action, details, updated_by)
+        VALUES (?, ?, ?, ?)
+    ');
+    $stmt->execute([
+        $productId,
+        $action === 'create' ? 'create' : 'update',
+        json_encode(['fields' => $fields], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        $userId,
+    ]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -82,6 +130,9 @@ function handleGet(PDO $pdo, string $action): void
         case 'products':
             $rows = fetchProducts($pdo, $q, $month, $productType, $brandId);
             api_json($rows);
+            break;
+        case 'product_history':
+            fetchProductHistory($pdo, (int)($_GET['id'] ?? 0));
             break;
         case 'brands':
             $rows = fetchBrands($pdo, $q, $status);
@@ -157,7 +208,7 @@ function addProduct(PDO $pdo, array $body): void
     $user = current_user();
     $userId = $user['id'] ?? null;
 
-    $check = $pdo->prepare("SELECT id FROM products WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1");
+    $check = $pdo->prepare("SELECT id, name AS product_name, selling_price, cost, brand_id FROM products WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1");
     $check->execute([$name]);
     $existing = $check->fetch(PDO::FETCH_ASSOC);
 
@@ -183,6 +234,18 @@ function addProduct(PDO $pdo, array $body): void
         ");
         $stmt->execute([$productId, $month, $sellingPrice, $userId]);
         if ($month === date('Y-m')) $pdo->prepare("UPDATE products SET cost = ? WHERE id = ?")->execute([$sellingPrice, $productId]);
+        productHistoryLog(
+            $pdo,
+            $productId,
+            $existing ? 'update' : 'create',
+            $existing ? [
+                'product_name' => (string)$existing['product_name'],
+                'selling_price' => (float)($existing['selling_price'] ?: $existing['cost']),
+                'brand_id' => $existing['brand_id'],
+            ] : [],
+            ['product_name' => $name, 'selling_price' => $sellingPrice, 'brand_id' => $brandId],
+            $userId !== null ? (int)$userId : null
+        );
         api_json(['success' => true, 'message' => $existing ? 'Product already exists. Monthly cost updated.' : 'Product added.']);
     } else {
         api_error('Failed to create product.');
@@ -202,6 +265,13 @@ function updateCost(PDO $pdo, array $body): void
         api_error('Invalid data or future month not allowed.');
     }
 
+    $beforeStmt = $pdo->prepare('SELECT name AS product_name, selling_price, cost, brand_id FROM products WHERE id = ? LIMIT 1');
+    $beforeStmt->execute([$productId]);
+    $before = $beforeStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$before) {
+        api_error('Product not found.', 404);
+    }
+
     if ($productName !== '') {
         $pdo->prepare("UPDATE products SET name = ?, brand_id = ?, selling_price = ? WHERE id = ?")->execute([$productName, $brandId, $sellingPrice, $productId]);
     }
@@ -219,6 +289,19 @@ function updateCost(PDO $pdo, array $body): void
     if ($month === $currentMonth) {
         $pdo->prepare("UPDATE products SET cost = ?, selling_price = ? WHERE id = ?")->execute([$sellingPrice, $sellingPrice, $productId]);
     }
+
+    productHistoryLog(
+        $pdo,
+        $productId,
+        'update',
+        [
+            'product_name' => (string)$before['product_name'],
+            'selling_price' => (float)($before['selling_price'] ?: $before['cost']),
+            'brand_id' => $before['brand_id'],
+        ],
+        ['product_name' => $productName, 'selling_price' => $sellingPrice, 'brand_id' => $brandId],
+        $userId !== null ? (int)$userId : null
+    );
 
     api_json(['success' => true, 'message' => 'Product cost updated.']);
 }
@@ -343,7 +426,7 @@ function fetchProducts(PDO $pdo, string $q, string $month, string $productType, 
     $stmt = $pdo->prepare("
         SELECT p.id, p.name AS product_name, p.name, p.sku, p.brand_id, p.active,
                COALESCE(p.product_type, 'General') AS product_type,
-               COALESCE(pc.selling_price, p.cost) AS selling_price,
+               COALESCE(NULLIF(p.selling_price, 0), p.cost, 0) AS selling_price,
                COALESCE(pc.total_cost, 0) AS total_cost,
                COALESCE(pc.original_cost, 0) AS original_cost,
                COALESCE(pc.supplier_cost, 0) AS supplier_cost,
@@ -353,7 +436,7 @@ function fetchProducts(PDO $pdo, string $q, string $month, string $productType, 
                COALESCE(pc.commission_amount, 0) AS commission_amount,
                COALESCE(pc.notes, '') AS notes,
                pc.cost_updated_at,
-               u.name AS updated_by_name,
+               COALESCE(NULLIF(hu.name, ''), hu.username, NULLIF(u.name, ''), u.username, '') AS updated_by_name,
                COALESCE(b.name, '') AS brand_name,
                COALESCE(b.color, '') AS brand_color,
                CASE WHEN COALESCE(p.product_type, 'General') = 'set' THEN COALESCE(ps.available_stock, 0) ELSE COALESCE(inv.total_quantity, 0) END AS available_stock,
@@ -361,6 +444,16 @@ function fetchProducts(PDO $pdo, string $q, string $month, string $productType, 
         FROM products p
         LEFT JOIN product_costs pc ON p.id = pc.product_id AND pc.month_year = ?
         LEFT JOIN users u ON pc.updated_by = u.id
+        LEFT JOIN (
+            SELECT h.product_id, h.updated_by
+            FROM product_management_history h
+            INNER JOIN (
+                SELECT product_id, MAX(id) AS max_id
+                FROM product_management_history
+                GROUP BY product_id
+            ) latest ON latest.max_id = h.id
+        ) product_history ON product_history.product_id = p.id
+        LEFT JOIN users hu ON hu.id = product_history.updated_by
         LEFT JOIN brands b ON b.id = p.brand_id
         LEFT JOIN product_sets ps ON p.name = ps.set_name AND COALESCE(p.product_type, 'General') = 'set'
         LEFT JOIN (
@@ -395,9 +488,54 @@ $rows[] = [
             'commission_amount' => (float)$r['commission_amount'],
             'available_stock' => (int)$r['available_stock'],
             'product_type' => (string)$r['product_type'],
+            'updated_by_name' => (string)($r['updated_by_name'] ?? ''),
         ];
     }
     return $rows;
+}
+
+function fetchProductHistory(PDO $pdo, int $productId): void
+{
+    if ($productId <= 0) {
+        api_error('Invalid product ID.', 422);
+    }
+
+    $productStmt = $pdo->prepare('SELECT id, name FROM products WHERE id = ? LIMIT 1');
+    $productStmt->execute([$productId]);
+    $product = $productStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$product) {
+        api_error('Product not found.', 404);
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT
+            h.id,
+            h.action,
+            h.details,
+            h.created_at,
+            COALESCE(NULLIF(u.name, ''), u.username, 'System') AS updated_by_name
+        FROM product_management_history h
+        LEFT JOIN users u ON u.id = h.updated_by
+        WHERE h.product_id = ?
+        ORDER BY h.created_at DESC, h.id DESC
+    ");
+    $stmt->execute([$productId]);
+    $history = array_map(static function (array $row): array {
+        $details = json_decode((string)($row['details'] ?? ''), true);
+        return [
+            'id' => (int)$row['id'],
+            'action' => (string)$row['action'],
+            'details' => is_array($details) ? $details : ['fields' => []],
+            'updated_by_name' => (string)$row['updated_by_name'],
+            'created_at' => (string)$row['created_at'],
+        ];
+    }, $stmt->fetchAll(PDO::FETCH_ASSOC));
+
+    api_json([
+        'success' => true,
+        'product' => ['id' => (int)$product['id'], 'name' => (string)$product['name']],
+        'history' => $history,
+    ]);
 }
 
 function fetchBrands(PDO $pdo, string $q, string $status): array

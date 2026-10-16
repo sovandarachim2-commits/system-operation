@@ -12,7 +12,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && ($_GET['view'] ?? '') ===
 } elseif ($mecAccessAction === 'reopen') {
     require_role_or_permission(['admin'], 'sr_month_end_closing.approve');
 } else {
-    require_role_or_permission(['admin'], 'sr_month_end_closing.view', 'sr_income_statement.view', 'sr_bank_balances.view', 'sr_inventory_closing.view');
+    require_role_or_permission(['admin'], 'sr_month_end_closing.view');
 }
 
 const MEC_STEPS = [
