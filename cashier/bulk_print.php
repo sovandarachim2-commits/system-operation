@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 require_once __DIR__ . '/../auth.php';
 require_role_or_permission(['cashier', 'admin'], 'print_orders.view');
 require_once __DIR__ . '/../helpers.php';
@@ -119,13 +119,13 @@ if (!isEodFinalized($pdo)) {
     exit;
 }
 
-// Determine which orders are newly printed by this cashier
-$stmtCheck = $pdo->prepare('SELECT id FROM print_jobs WHERE order_id = ? AND cashier_id = ? LIMIT 1');
+// Stock is deducted once per order. A later print by any cashier is a reprint.
+$stmtCheck = $pdo->prepare('SELECT id FROM print_jobs WHERE order_id = ? LIMIT 1');
 $stmtIns   = $pdo->prepare('INSERT INTO print_jobs (order_id, cashier_id) VALUES (?, ?)');
 $newPrintOrderIds = [];
 
 foreach ($orderIds as $oid) {
-    $stmtCheck->execute([$oid, $user['id']]);
+    $stmtCheck->execute([$oid]);
     if (!$stmtCheck->fetch()) {
         $newPrintOrderIds[] = (int)$oid;
     }

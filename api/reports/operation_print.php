@@ -276,7 +276,12 @@ try {
             $stmtChk->execute(['2026-03-13 00:00:00']);
             $overdue = $stmtChk->fetchAll(PDO::FETCH_ASSOC);
             if ($overdue) {
-                api_error('Cannot send #stop: Some prepared items exceed 24h without Out scan.', 409, ['overdue_items' => $overdue]);
+                $overdueInvList = array_column($overdue, 'inv');
+                $overdueInvStr = implode(', ', array_slice($overdueInvList, 0, 20));
+                if (count($overdueInvList) > 20) {
+                    $overdueInvStr .= ' ... and ' . (count($overdueInvList) - 20) . ' more';
+                }
+                api_error('Cannot send #stop: Some prepared items exceed 24h without Out scan. Orders: ' . $overdueInvStr, 409, ['overdue_items' => $overdue]);
             }
 
             $stmtMissing = $pdo->prepare(

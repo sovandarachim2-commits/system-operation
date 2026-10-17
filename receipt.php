@@ -602,10 +602,21 @@ require_once __DIR__ . '/config.php';
         .container-fluid.py-3 {
             padding: 0 !important;
         }
+        <?php if ($from === 'reprint'): ?>
+        .receipt-capture-stack,
+        .receipt-card,
+        .receipt-lucky-outer-card {
+            width: 360px;
+            max-width: 360px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        <?php else: ?>
         .receipt-card {
             max-width: 100%;
             margin: 0 auto;
         }
+        <?php endif; ?>
     </style>
     <?php endif; ?>
 </head>

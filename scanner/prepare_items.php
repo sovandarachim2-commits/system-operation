@@ -27,9 +27,9 @@ require_role_or_permission(['admin', 'cashier', 'scanner'], 'scanner_home.view')
     .bottom-bar {position:fixed; left:0; bottom:0; width:100%; background:#232323; height:65px; display:flex; justify-content:space-around; align-items:center; border-top:2px solid #444;}
     .bottom-btn {background:none; border:none; color:#ffb44c; font-size:2em; cursor:pointer;}
     #scannerOverlay {display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(30,30,30,0.96); z-index:9999; align-items:center; justify-content:center; flex-direction:column;}
-    #qr-reader {width:95vw; max-width:100%; height:100vh; background:#000;}
-    #closeScannerBtn {position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#ff726f;color:white;padding:16px 28px;border:none;border-radius:14px;font-size:1.2em;z-index:9998;}
-    #scanStatus {position:fixed;top:40px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.8);color:#2ecc71;padding:15px 30px;border-radius:10px;font-size:1.1em;z-index:9998;}
+    #qr-reader {width:95vw; max-width:600px; height:70vh; background:#101010; margin:auto; border-radius:12px;}
+    #closeScannerBtn {margin-top:20px; background:#ff726f; color:white; padding:16px 28px; border:none; border-radius:14px; font-size:1.2em;}
+    #scanStatus {text-align:center; color:white; font-size:1.2em; margin-bottom:12px;}
     .save-btn {background:#2ecc71; color:white; border:none; border-radius:10px; padding:12px 24px; font-size:1.15em; margin:30px 10px 10px 10px; cursor:pointer; font-weight:bold;}
     .history-btn {background:#2980b9; color:white; border:none; border-radius:10px; padding:12px 24px; font-size:1.15em; margin:10px 10px 30px 10px; cursor:pointer; font-weight:bold;}
     .home-btn {background:#4400ff; color:white; border:none; border-radius:10px; padding:12px 24px; font-size:1.15em; margin:10px 10px 30px 10px; cursor:pointer; font-weight:bold;}
@@ -361,6 +361,8 @@ require_role_or_permission(['admin', 'cashier', 'scanner'], 'scanner_home.view')
 
   scanBarcodeBtn.onclick = function() {
     if (!isCameraSupported()) { showCustomAlert(getCameraErrorMessage(null), '#ff4d4f', true); return; }
+    document.getElementById('scanStatus').textContent = 'Scanning QR/Barcode...';
+    document.getElementById('scanStatus').style.color = 'white';
     scannerOverlay.style.display = 'flex';
     if (!html5QrCode) html5QrCode = new Html5Qrcode('qr-reader');
     if (isScannerActive) return;

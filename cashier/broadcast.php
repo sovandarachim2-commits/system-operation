@@ -78,7 +78,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if (!empty($overdue)) {
                 $overdueItems = $overdue;
-                $errors[] = 'Cannot send #stop: Some prepared items exceed 24h without Out scan.';
+                $overdueInvList = array_map(function($r) { return $r['inv']; }, $overdue);
+                $overdueInvStr = implode(', ', array_slice($overdueInvList, 0, 20));
+                if (count($overdueInvList) > 20) {
+                    $overdueInvStr .= ' ... and ' . (count($overdueInvList) - 20) . ' more';
+                }
+                $errors[] = 'Cannot send #stop: Some prepared items exceed 24h without Out scan. Orders: ' . $overdueInvStr;
             } elseif (!empty($missingPreparedOrders)) {
                 $errors[] = 'Cannot send #stop: Some printed orders are missing in Prepared Items.';
             } else {
