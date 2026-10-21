@@ -30,19 +30,6 @@ function pc_request_range(): array
     return [$from, $to, $costMonth];
 }
 
-function pc_brand_ids(mixed $value): array
-{
-    $parts = is_array($value) ? $value : preg_split('/\s*,\s*/', trim((string)$value), -1, PREG_SPLIT_NO_EMPTY);
-    $ids = [];
-    foreach ($parts as $part) {
-        $id = filter_var($part, FILTER_VALIDATE_INT);
-        if ($id !== false && (int)$id > 0) {
-            $ids[] = (int)$id;
-        }
-    }
-    return array_values(array_unique($ids));
-}
-
 function pc_num(mixed $value): float
 {
     $number = (float)$value;
@@ -115,9 +102,11 @@ function pc_ensure_schema(PDO $pdo): void
 function pc_load(PDO $pdo): void
 {
     require_role_or_permission(['admin'], 'sr_product_costing.view', 'product_costs.view');
+    pc_previous_cost_respond($pdo, 'online');
     pc_history_ensure_schema($pdo);
 
     [$from, $to, $month] = pc_request_range();
+    pc_lock_respond_if_locked($pdo, 'online', $month);
     $q = trim((string)($_GET['q'] ?? ''));
     $brandIds = pc_brand_ids($_GET['brand_ids'] ?? $_GET['brand_id'] ?? '');
 
@@ -154,6 +143,7 @@ function pc_load(PDO $pdo): void
                 END
             ) AS line_delivery,
             COALESCE(o.status, 'unpaid') AS payment_status,
+            COALESCE(o.is_paid, 0) AS is_paid,
             pj.printed_at
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
@@ -260,6 +250,8 @@ function pc_load(PDO $pdo): void
         ];
     };
 
+    $paymentOrders = ['paid' => [], 'unpaid' => [], 'partial' => []];
+    $paymentNetByProduct = [];
     foreach ($soldItems as $row) {
         $qty = (float)($row['quantity'] ?? 0);
         if ($qty <= 0) {
@@ -268,8 +260,11 @@ function pc_load(PDO $pdo): void
         $lineTotal = (float)($row['line_total'] ?? 0);
         $lineDiscount = (float)($row['line_discount'] ?? 0);
         $lineDelivery = (float)($row['line_delivery'] ?? 0);
-        $rawStatus = strtolower(trim((string)($row['payment_status'] ?? 'unpaid')));
-        $paymentStatus = $rawStatus === 'paid' ? 'paid' : 'unpaid';
+        $paymentStatus = pc_bucket_payment_status((string)($row['payment_status'] ?? ''), 0, 0, (int)($row['is_paid'] ?? 0) === 1);
+        $paymentAllowed = pc_payment_status_allowed($paymentStatus);
+        $notePaymentProduct = static function (array $source) use (&$paymentOrders, $paymentStatus): void {
+            pc_note_payment_order($paymentOrders, $paymentStatus, (int)($source['product_id'] ?? 0));
+        };
         $context = [
             'order_id' => (int)($row['order_id'] ?? 0),
             'order_code' => (string)($row['order_code'] ?? ''),
@@ -298,17 +293,27 @@ function pc_load(PDO $pdo): void
                     }
                     $weight = max($componentQty * (float)($component['unit_cost'] ?? 0), $componentQty);
                     $ratio = $weight / $weightTotal;
-                    $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $lineDelivery * $ratio, $context);
+                    $notePaymentProduct($component);
+                    pc_add_product_payment_net($paymentNetByProduct, (int)($component['product_id'] ?? 0), $paymentStatus, max(0, ($lineTotal - $lineDiscount + $lineDelivery) * $ratio));
+                    if ($paymentAllowed) {
+                        $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $lineDelivery * $ratio, $context);
+                    }
                 }
                 continue;
             }
         }
 
-        $addSold($row, $qty, $lineTotal, $lineDiscount, $lineDelivery, $context);
+        $notePaymentProduct($row);
+        pc_add_product_payment_net($paymentNetByProduct, (int)($row['product_id'] ?? 0), $paymentStatus, max(0, $lineTotal - $lineDiscount + $lineDelivery));
+        if ($paymentAllowed) {
+            $addSold($row, $qty, $lineTotal, $lineDiscount, $lineDelivery, $context);
+        }
     }
 
     $soldProductIds = array_keys($soldByProduct);
-    if (!$soldProductIds) {
+    $scopeProductIds = pc_scope_product_ids($soldProductIds, $paymentNetByProduct);
+    $includeUnsold = pc_include_unsold();
+    if (!$scopeProductIds && !$includeUnsold) {
         api_json([
             'success' => true,
             'month' => $month,
@@ -319,28 +324,29 @@ function pc_load(PDO $pdo): void
                 'missing_cost' => 0,
                 'sold_qty' => 0,
                 'net_sales' => 0,
+                'paid_net_sales' => 0,
+                'balance_net_sales' => 0,
                 'total_cost' => 0,
                 'gross_profit' => 0,
             ],
             'rows' => [],
-            'options' => ['brands' => $brands],
+            'options' => pc_checkbox_options($brands, [], $paymentOrders),
         ]);
     }
 
     $productWhere = [
-        'p.id IN (' . implode(',', array_fill(0, count($soldProductIds), '?')) . ')',
         'COALESCE(p.active, 1) = 1',
         "LOWER(COALESCE(p.product_type, 'normal')) <> 'set'",
     ];
-    $productParams = array_merge([$month], $soldProductIds);
+    $productParams = [$month];
+    if (!$includeUnsold) {
+        $productWhere[] = 'p.id IN (' . implode(',', array_fill(0, count($scopeProductIds), '?')) . ')';
+        array_push($productParams, ...$scopeProductIds);
+    }
     if ($q !== '') {
         $productWhere[] = '(p.name LIKE ? OR COALESCE(p.sku, \'\') LIKE ? OR COALESCE(b.name, \'\') LIKE ?)';
         $like = '%' . $q . '%';
         array_push($productParams, $like, $like, $like);
-    }
-    if ($brandIds) {
-        $productWhere[] = 'p.brand_id IN (' . implode(',', array_fill(0, count($brandIds), '?')) . ')';
-        array_push($productParams, ...$brandIds);
     }
     $productWhereSql = 'WHERE ' . implode(' AND ', $productWhere);
 
@@ -379,8 +385,10 @@ function pc_load(PDO $pdo): void
     ");
     $stmt->execute($productParams);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $brandCounts = pc_count_brands($rows);
+    $rows = pc_filter_rows_by_brand($rows, $brandIds);
 
-    $rows = array_map(static function (array $row) use ($soldByProduct): array {
+    $rows = array_map(static function (array $row) use ($soldByProduct, $paymentNetByProduct): array {
         $sold = $soldByProduct[(int)$row['product_id']] ?? ['sold_qty' => 0, 'sold_amount' => 0, 'discount_amount' => 0, 'delivery_amount' => 0];
         $unitCost = (float)$row['unit_cost'] + (float)$row['commission_amount'];
         $soldQty = (float)$sold['sold_qty'];
@@ -395,6 +403,7 @@ function pc_load(PDO $pdo): void
         $totalCost = $soldQty * $unitCost;
         $grossProfit = $netSales - $totalCost;
         $row['net_sales'] = $netSales;
+        $row = array_merge($row, pc_payment_fields_from_transactions($row['transactions'], $netSales));
         $row['total_cost'] = $totalCost;
         $row['gross_profit'] = $grossProfit;
         $row['profit_margin'] = $netSales > 0 ? ($grossProfit / $netSales) * 100 : 0;
@@ -414,11 +423,21 @@ function pc_load(PDO $pdo): void
         return $row;
     }, $rows);
 
+    if (pc_payment_statuses() !== null && !$includeUnsold) {
+        $rows = array_values(array_filter(
+            $rows,
+            static fn(array $row): bool => (float)($row['sold_qty'] ?? 0) > 0
+        ));
+    }
+
+    $paymentSummary = pc_summary_payment_nets($rows);
     $summary = [
         'products' => count($rows),
         'missing_cost' => count(array_filter($rows, static fn(array $row): bool => (bool)$row['missing_cost'])),
         'sold_qty' => array_sum(array_map(static fn(array $row): float => (float)$row['sold_qty'], $rows)),
         'net_sales' => array_sum(array_map(static fn(array $row): float => (float)$row['net_sales'], $rows)),
+        'paid_net_sales' => $paymentSummary['paid_net_sales'],
+        'balance_net_sales' => $paymentSummary['balance_net_sales'],
         'total_cost' => array_sum(array_map(static fn(array $row): float => (float)$row['total_cost'], $rows)),
         'gross_profit' => array_sum(array_map(static fn(array $row): float => (float)$row['gross_profit'], $rows)),
     ];
@@ -428,9 +447,11 @@ function pc_load(PDO $pdo): void
         'month' => $month,
         'from' => $from,
         'to' => $to,
+        'locked' => false,
+        'lock' => null,
         'summary' => $summary,
         'rows' => $rows,
-        'options' => ['brands' => $brands],
+        'options' => pc_checkbox_options($brands, $brandCounts, $paymentOrders),
     ]);
 }
 
@@ -439,13 +460,15 @@ function pc_save(PDO $pdo): void
     require_role_or_permission(['admin'], 'sr_product_costing.update', 'product_costs.update');
 
     $input = pc_input();
+    pc_lock_handle_action($pdo, 'online', $input);
     $month = pc_month($input['month_year'] ?? null);
+    pc_lock_assert_open($pdo, 'online', $month);
     $productId = (int)($input['product_id'] ?? 0);
     if ($productId <= 0) {
         api_error('Invalid product.', 422);
     }
 
-    $selling = max(0, pc_num($input['selling_price'] ?? 0));
+    $selling = pc_product_menu_selling_price($pdo, $productId, $month);
     $original = max(0, pc_num($input['original_cost'] ?? 0));
     $supplier = max(0, pc_num($input['supplier_cost'] ?? 0));
     $shipping = max(0, pc_num($input['shipping_cost'] ?? 0));
@@ -462,7 +485,6 @@ function pc_save(PDO $pdo): void
             (product_id, month_year, selling_price, original_cost, supplier_cost, shipping_cost, other_costs, marketing_cost, commission_amount, notes, updated_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
-            selling_price = VALUES(selling_price),
             original_cost = VALUES(original_cost),
             supplier_cost = VALUES(supplier_cost),
             shipping_cost = VALUES(shipping_cost),

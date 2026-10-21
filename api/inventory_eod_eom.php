@@ -9,13 +9,30 @@ $pdo = get_db_connection();
 eod_eom_ensure_physical_count_columns($pdo);
 eod_eom_ensure_difference_review_columns($pdo);
 eod_eom_ensure_eom_sheet_columns($pdo);
-require_role_or_permission(
-    ['admin'],
-    'sr_inventory_closing.view',
-    'inventory.view',
-    'stock_reports.view',
-    'stock_dashboard.view'
-);
+function inventory_closing_request_type(array $source, string $action = ''): string
+{
+    if ($action === 'generate_eom' || inventory_api_str($source['marketing_type_qty'] ?? '') === '1') {
+        return 'eom';
+    }
+    if ($action === 'generate_eod') {
+        return 'eod';
+    }
+    $type = strtolower(inventory_api_str($source['report_type'] ?? 'eod'));
+    return $type === 'eom' ? 'eom' : 'eod';
+}
+
+function inventory_closing_require(string $reportType, string ...$actions): void
+{
+    $prefix = $reportType === 'eom' ? 'sr_inventory_eom_closing' : 'sr_inventory_closing';
+    $keys = [];
+    foreach ($actions as $action) {
+        $keys[] = $prefix . '.' . $action;
+        if ($reportType !== 'eom' && $action === 'view') {
+            array_push($keys, 'inventory.view', 'stock_reports.view', 'stock_dashboard.view');
+        }
+    }
+    require_role_or_permission(['admin'], ...array_values(array_unique($keys)));
+}
 
 $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 if ($method === 'POST') {
@@ -36,8 +53,14 @@ if ($method === 'POST') {
     $userId = (int)($currentUser['id'] ?? ($_SESSION['user_id'] ?? 0)) ?: null;
 
     try {
+        $reportTypeForPerm = inventory_closing_request_type($payload, $action);
+        $sharedTelegram = in_array($action, ['save_telegram_settings', 'test_telegram_notification'], true);
+        if (!$sharedTelegram) {
+            inventory_closing_require($reportTypeForPerm, 'view');
+        }
+
         if ($action === 'generate_eod') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.create');
+            inventory_closing_require($reportTypeForPerm, 'create');
             $result = eod_eom_generate_eod(
                 $pdo,
                 inventory_api_date($payload['report_date'] ?? null, date('Y-m-d')),
@@ -54,7 +77,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'generate_eom') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.create');
+            inventory_closing_require($reportTypeForPerm, 'create');
             $month = inventory_api_str($payload['report_month'] ?? date('Y-m'));
             if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
                 $month = date('Y-m');
@@ -75,7 +98,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'delete_report') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.delete');
+            inventory_closing_require($reportTypeForPerm, 'delete');
             $result = eod_eom_delete_report(
                 $pdo,
                 inventory_api_str($payload['report_type'] ?? 'eod'),
@@ -92,11 +115,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'finalize_report') {
-            require_role_or_permission(
-                ['admin'],
-                'sr_inventory_closing.update',
-                'sr_inventory_closing.create'
-            );
+            inventory_closing_require($reportTypeForPerm, 'update', 'create');
             $files = isset($_FILES['attachments']) && is_array($_FILES['attachments'])
                 ? eod_eom_normalize_uploaded_files($_FILES['attachments'])
                 : [];
@@ -135,7 +154,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'save_telegram_settings') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.update');
+            require_role_or_permission(['admin'], 'sr_inventory_closing.update', 'sr_inventory_eom_closing.update');
             $settings = inventory_closing_save_telegram_settings($pdo, $payload);
             api_json([
                 'success' => true,
@@ -145,7 +164,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'test_telegram_notification') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.update');
+            require_role_or_permission(['admin'], 'sr_inventory_closing.update', 'sr_inventory_eom_closing.update');
             $testReportType = strtolower(inventory_api_str($payload['report_type'] ?? 'eod'));
             if (!in_array($testReportType, ['eod', 'eom'], true)) {
                 $testReportType = 'eod';
@@ -169,7 +188,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'approve_differences') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.approve', 'sr_inventory_closing.update');
+            inventory_closing_require($reportTypeForPerm, 'approve', 'update');
             $result = eod_eom_approve_differences(
                 $pdo,
                 inventory_api_str($payload['report_type'] ?? 'eod'),
@@ -191,7 +210,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'reject_differences') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.approve', 'sr_inventory_closing.update');
+            inventory_closing_require($reportTypeForPerm, 'approve', 'update');
             $result = eod_eom_reject_differences(
                 $pdo,
                 inventory_api_str($payload['report_type'] ?? 'eod'),
@@ -213,11 +232,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'save_final_quantity') {
-            require_role_or_permission(
-                ['admin'],
-                'sr_inventory_closing.update',
-                'sr_inventory_closing.create'
-            );
+            inventory_closing_require($reportTypeForPerm, 'update', 'create');
             $result = inventory_closing_save_final_quantity(
                 $pdo,
                 inventory_api_str($payload['report_type'] ?? 'eod'),
@@ -237,7 +252,7 @@ if ($method === 'POST') {
         }
 
         if ($action === 'update_status') {
-            require_role_or_permission(['admin'], 'sr_inventory_closing.update');
+            inventory_closing_require($reportTypeForPerm, 'update');
             $result = eod_eom_update_status(
                 $pdo,
                 inventory_api_str($payload['report_type'] ?? 'eod'),
@@ -272,10 +287,7 @@ if ($method === 'POST') {
     }
 }
 
-$reportType = strtolower(inventory_api_str($_GET['report_type'] ?? 'eod'));
-if (!in_array($reportType, ['eod', 'eom'], true)) {
-    $reportType = 'eod';
-}
+$reportType = inventory_closing_request_type($_GET);
 
 $reportId = inventory_api_int($_GET['report_id'] ?? 0);
 $locationId = inventory_api_int($_GET['location_id'] ?? 0);
@@ -309,12 +321,14 @@ foreach (inventory_location_options($pdo) as $loc) {
 }
 
 if (inventory_api_str($_GET['settings'] ?? '') === 'telegram') {
-    require_role_or_permission(['admin'], 'sr_inventory_closing.update');
+    require_role_or_permission(['admin'], 'sr_inventory_closing.update', 'sr_inventory_eom_closing.update');
     api_json([
         'success' => true,
         'settings' => inventory_closing_telegram_settings($pdo),
     ]);
 }
+
+inventory_closing_require($reportType, 'view');
 
 if (inventory_api_str($_GET['marketing_type_qty'] ?? '') === '1') {
     $typeMonth = inventory_api_str($_GET['month'] ?? $month);

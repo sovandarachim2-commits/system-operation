@@ -105,14 +105,16 @@ function opc_load(PDO $pdo): void
 {
     [$from, $to, $month] = opc_request_range();
     $q = trim((string)($_GET['q'] ?? ''));
-    $brandId = filter_var($_GET['brand_id'] ?? null, FILTER_VALIDATE_INT);
-    $teamId = filter_var($_GET['team_id'] ?? null, FILTER_VALIDATE_INT);
+    $brandIds = pc_brand_ids($_GET['brand_ids'] ?? $_GET['brand_id'] ?? '');
+    $teamIds = pc_brand_ids($_GET['team_ids'] ?? $_GET['team_id'] ?? '');
     $summaryOnly = (string)($_GET['summary_only'] ?? '') === '1';
     if ($summaryOnly) {
         require_role_or_permission(['admin'], 'sr_offline_product_costing.view', 'sr_product_costing.view', 'sr_income_statement.view', 'product_costs.view');
     } else {
         require_role_or_permission(['admin'], 'sr_offline_product_costing.view', 'sr_product_costing.view', 'product_costs.view');
     }
+    pc_previous_cost_respond($pdo, 'offline');
+    pc_lock_respond_if_locked($pdo, 'offline', $month, $summaryOnly);
     offline_ensure_schema($pdo);
     if (!$summaryOnly) {
         pc_history_ensure_schema($pdo);
@@ -137,10 +139,6 @@ function opc_load(PDO $pdo): void
         "LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')",
     ];
     $soldParams = [$from, $to];
-    if ($teamId !== false && $teamId !== null) {
-        $soldWhere[] = 'o.team_id = ?';
-        $soldParams[] = (int)$teamId;
-    }
     $soldWhereSql = implode(' AND ', $soldWhere);
 
     $soldStmt = $pdo->prepare("
@@ -262,6 +260,7 @@ function opc_load(PDO $pdo): void
             'qty' => $qty,
             'gross_sales' => $sales,
             'discount' => $discount,
+            'buy_back' => 0,
             'net_sales' => max(0, $sales - $discount),
             'receipt_url' => !empty($context['order_id'])
                 ? '/OrderShadow/admin/offline_sale_print.php?type=receipt&ids=' . (int)$context['order_id']
@@ -269,6 +268,9 @@ function opc_load(PDO $pdo): void
         ];
     };
 
+    $paymentOrders = ['paid' => [], 'unpaid' => [], 'partial' => []];
+    $paymentNetByProduct = [];
+    $paymentNetBySale = [];
     foreach ($soldItems as $row) {
         $qty = (float)($row['quantity'] ?? 0);
         if ($qty <= 0) {
@@ -281,6 +283,12 @@ function opc_load(PDO $pdo): void
             'total_amount' => (float)($row['order_total_amount'] ?? 0),
             'received_amount' => (float)($row['order_received_amount'] ?? 0),
         ], []);
+        $paymentAllowed = pc_payment_status_allowed($paymentStatus);
+        $teamIdValue = (int)($row['team_id'] ?? 0);
+        $teamAllowed = !$teamIds || in_array($teamIdValue, $teamIds, true);
+        $notePaymentProduct = static function (array $source) use (&$paymentOrders, $paymentStatus): void {
+            pc_note_payment_order($paymentOrders, $paymentStatus, (int)($source['product_id'] ?? 0));
+        };
         $context = [
             'order_id' => (int)($row['order_id'] ?? 0),
             'order_code' => (string)($row['order_code'] ?? ''),
@@ -311,20 +319,145 @@ function opc_load(PDO $pdo): void
                     }
                     $weight = max($componentQty * (float)($component['unit_cost'] ?? 0), $componentQty);
                     $ratio = $weight / $weightTotal;
-                    $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $context);
+                    $notePaymentProduct($component);
+                    if ($teamAllowed) {
+                        $componentId = (int)($component['product_id'] ?? 0);
+                        $componentNet = max(0, ($lineTotal - $lineDiscount) * $ratio);
+                        pc_add_product_payment_net($paymentNetByProduct, $componentId, $paymentStatus, $componentNet);
+                        pc_add_keyed_payment_net($paymentNetBySale, $componentId . '|' . $teamIdValue, $paymentStatus, $componentNet);
+                    }
+                    if ($paymentAllowed) {
+                        $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $context);
+                    }
                 }
                 continue;
             }
         }
 
-        $addSold($row, $qty, $lineTotal, $lineDiscount, $context);
+        $notePaymentProduct($row);
+        if ($teamAllowed) {
+            $lineProductId = (int)($row['product_id'] ?? 0);
+            $lineNet = max(0, $lineTotal - $lineDiscount);
+            pc_add_product_payment_net($paymentNetByProduct, $lineProductId, $paymentStatus, $lineNet);
+            pc_add_keyed_payment_net($paymentNetBySale, $lineProductId . '|' . $teamIdValue, $paymentStatus, $lineNet);
+        }
+        if ($paymentAllowed) {
+            $addSold($row, $qty, $lineTotal, $lineDiscount, $context);
+        }
     }
 
-    $soldProductIds = array_values(array_unique(array_map(
-        static fn(array $sold): int => (int)$sold['product_id'],
-        $soldByKey
+    $buyStmt = $pdo->prepare("
+        SELECT
+            pi.order_id,
+            o.order_code,
+            COALESCE(o.customer_name, '') AS customer_name,
+            COALESCE(t.id, 0) AS team_id,
+            COALESCE(t.name, 'Unassigned') AS team_name,
+            COALESCE(t.name, s.name, '') AS seller_name,
+            pi.product_id,
+            COALESCE(p.name, pi.product_name) AS product_name,
+            pi.quantity,
+            pi.line_total,
+            COALESCE(o.status, 'unpaid') AS order_status,
+            COALESCE(o.total_amount, 0) AS order_total_amount,
+            COALESCE(o.received_amount, 0) AS order_received_amount,
+            o.sale_date AS sold_at
+        FROM offline_sale_purchase_items pi
+        JOIN offline_sale_orders o ON o.id = pi.order_id
+        LEFT JOIN products p ON p.id = pi.product_id
+        LEFT JOIN offline_teams t ON t.id = o.team_id
+        LEFT JOIN offline_sellers s ON s.id = o.seller_id
+        WHERE {$soldWhereSql}
+        ORDER BY o.sale_date DESC, pi.order_id DESC, pi.id ASC
+    ");
+    $buyStmt->execute($soldParams);
+    $buyBackByKey = [];
+    foreach ($buyStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $qty = (float)($row['quantity'] ?? 0);
+        $amount = (float)($row['line_total'] ?? 0);
+        if ($qty <= 0 && $amount <= 0) {
+            continue;
+        }
+        $teamIdValue = (int)($row['team_id'] ?? 0);
+        if ($teamIds && !in_array($teamIdValue, $teamIds, true)) {
+            continue;
+        }
+        $paymentStatus = offline_order_display_status([
+            'status' => (string)($row['order_status'] ?? 'unpaid'),
+            'total_amount' => (float)($row['order_total_amount'] ?? 0),
+            'received_amount' => (float)($row['order_received_amount'] ?? 0),
+        ], []);
+        if (!pc_payment_status_allowed($paymentStatus)) {
+            continue;
+        }
+        $productId = (int)($row['product_id'] ?? 0);
+        if ($productId <= 0) {
+            continue;
+        }
+        pc_note_payment_order($paymentOrders, $paymentStatus, $productId);
+        $key = $productId . '|' . $teamIdValue;
+        if (!isset($buyBackByKey[$key])) {
+            $buyBackByKey[$key] = [
+                'product_id' => $productId,
+                'team_id' => $teamIdValue,
+                'team_name' => (string)($row['team_name'] ?? 'Unassigned'),
+                'qty' => 0.0,
+                'amount' => 0.0,
+                'transactions' => [],
+            ];
+        }
+        $buyBackByKey[$key]['qty'] += $qty;
+        $buyBackByKey[$key]['amount'] += $amount;
+        $buyBackByKey[$key]['transactions'][] = [
+            'order_id' => (int)($row['order_id'] ?? 0),
+            'order_code' => (string)($row['order_code'] ?? ''),
+            'customer_name' => (string)($row['customer_name'] ?? ''),
+            'seller_name' => (string)($row['seller_name'] ?? ''),
+            'team_name' => (string)($row['team_name'] ?? 'Unassigned'),
+            'sold_at' => (string)($row['sold_at'] ?? ''),
+            'payment_status' => $paymentStatus,
+            'source_product' => (string)($row['product_name'] ?? ''),
+            'source_type' => 'buy_back',
+            'qty' => $qty,
+            'gross_sales' => 0,
+            'discount' => 0,
+            'buy_back' => $amount,
+            'net_sales' => -$amount,
+            'receipt_url' => !empty($row['order_id'])
+                ? '/OrderShadow/admin/offline_sale_print.php?type=receipt&ids=' . (int)$row['order_id']
+                : null,
+        ];
+    }
+
+    $teamCounts = [];
+    foreach ($soldByKey as $sold) {
+        $teamIdValue = (int)($sold['team_id'] ?? 0);
+        if ($teamIdValue > 0) {
+            $teamCounts[$teamIdValue] = ($teamCounts[$teamIdValue] ?? 0) + 1;
+        }
+    }
+    if ($teamIds) {
+        $allowedTeams = array_fill_keys($teamIds, true);
+        $soldByKey = array_filter(
+            $soldByKey,
+            static fn(array $sold): bool => isset($allowedTeams[(int)($sold['team_id'] ?? 0)])
+        );
+    }
+
+    foreach ($buyBackByKey as $buyBack) {
+        $teamIdValue = (int)($buyBack['team_id'] ?? 0);
+        if ($teamIdValue > 0) {
+            $teamCounts[$teamIdValue] = ($teamCounts[$teamIdValue] ?? 0) + 1;
+        }
+    }
+
+    $soldProductIds = array_values(array_unique(array_merge(
+        array_map(static fn(array $sold): int => (int)$sold['product_id'], $soldByKey),
+        array_map(static fn(array $buyBack): int => (int)$buyBack['product_id'], $buyBackByKey)
     )));
-    if (!$soldProductIds) {
+    $scopeProductIds = pc_scope_product_ids($soldProductIds, $paymentNetByProduct);
+    $includeUnsold = pc_include_unsold();
+    if (!$scopeProductIds && !$includeUnsold) {
         api_json([
             'success' => true,
             'month' => $month,
@@ -335,23 +468,26 @@ function opc_load(PDO $pdo): void
                 'missing_cost' => 0,
                 'sold_qty' => 0,
                 'net_sales' => 0,
+                'paid_net_sales' => 0,
+                'balance_net_sales' => 0,
                 'total_cost' => 0,
                 'gross_profit' => 0,
             ],
             'rows' => [],
-            'options' => ['brands' => $brands, 'teams' => $teams],
+            'options' => pc_checkbox_options($brands, [], $paymentOrders, [
+                'teams' => ['rows' => $teams, 'counts' => $teamCounts],
+            ]),
         ]);
     }
 
     $productWhere = [
-        'p.id IN (' . implode(',', array_fill(0, count($soldProductIds), '?')) . ')',
         'COALESCE(p.active, 1) = 1',
         "LOWER(COALESCE(p.product_type, 'normal')) <> 'set'",
     ];
-    $productParams = array_merge([$month], $soldProductIds);
-    if ($brandId !== false && $brandId !== null) {
-        $productWhere[] = 'p.brand_id = ?';
-        $productParams[] = (int)$brandId;
+    $productParams = [$month];
+    if (!$includeUnsold) {
+        $productWhere[] = 'p.id IN (' . implode(',', array_fill(0, count($scopeProductIds), '?')) . ')';
+        array_push($productParams, ...$scopeProductIds);
     }
     $productWhereSql = 'WHERE ' . implode(' AND ', $productWhere);
 
@@ -390,6 +526,8 @@ function opc_load(PDO $pdo): void
     ");
     $stmt->execute($productParams);
     $productRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $brandCounts = pc_count_brands($productRows);
+    $productRows = pc_filter_rows_by_brand($productRows, $brandIds);
     $productsById = [];
     foreach ($productRows as $productRow) {
         $productsById[(int)$productRow['product_id']] = $productRow;
@@ -403,24 +541,35 @@ function opc_load(PDO $pdo): void
         }
         $row = $product;
         $unitCost = (float)$row['unit_cost'] + (float)$row['commission_amount'];
-        $soldQty = (float)$sold['sold_qty'];
+        $saleQty = (float)$sold['sold_qty'];
         $soldAmount = (float)$sold['sold_amount'];
         $discount = (float)$sold['discount_amount'];
-        $netSales = max(0, $soldAmount - $discount);
-        $avgSelling = $soldQty > 0
-            ? ((float)$sold['price_amount'] / $soldQty)
+        $saleKey = (int)$sold['product_id'] . '|' . (int)$sold['team_id'];
+        $buyBack = $buyBackByKey[$saleKey] ?? null;
+        $buyBackAmount = is_array($buyBack) ? (float)($buyBack['amount'] ?? 0) : 0.0;
+        $buyBackQty = is_array($buyBack) ? (float)($buyBack['qty'] ?? 0) : 0.0;
+        if ($buyBack) {
+            unset($buyBackByKey[$saleKey]);
+        }
+        $soldQty = $saleQty - $buyBackQty;
+        $netSales = $soldAmount - $discount - $buyBackAmount;
+        $avgSelling = $saleQty > 0
+            ? ((float)$sold['price_amount'] / $saleQty)
             : (float)$row['catalog_selling_price'];
 
         $row['team_id'] = (int)$sold['team_id'];
         $row['team_name'] = (string)$sold['team_name'];
         $row['selling_price'] = $avgSelling;
         $row['sold_qty'] = $soldQty;
-        $row['sold_amount'] = $soldAmount;
+        $row['sold_amount'] = $soldAmount - $discount;
         $row['discount_amount'] = $discount;
-        $row['transactions'] = $sold['transactions'] ?? [];
+        $row['transactions'] = array_merge($sold['transactions'] ?? [], is_array($buyBack) ? ($buyBack['transactions'] ?? []) : []);
+        $row['buy_back_qty'] = $buyBackQty;
+        $row['buy_back_amount'] = $buyBackAmount;
         $totalCost = $soldQty * $unitCost;
         $grossProfit = $netSales - $totalCost;
         $row['net_sales'] = $netSales;
+        $row = array_merge($row, pc_payment_fields_from_transactions($row['transactions'], $netSales));
         $row['total_original_cost'] = $soldQty * (float)$row['original_cost'];
         $row['total_supplier_cost'] = $soldQty * (float)$row['supplier_cost'];
         $row['total_shipping_cost'] = $soldQty * (float)$row['shipping_cost'];
@@ -429,10 +578,97 @@ function opc_load(PDO $pdo): void
         $row['total_commission_amount'] = $soldQty * (float)$row['commission_amount'];
         $row['total_cost'] = $totalCost;
         $row['gross_profit'] = $grossProfit;
-        $row['profit_margin'] = $netSales > 0 ? ($grossProfit / $netSales) * 100 : 0;
+        $row['profit_margin'] = abs($netSales) > 0.0001 ? ($grossProfit / $netSales) * 100 : 0;
         $row['missing_cost'] = $unitCost <= 0;
         unset($row['catalog_selling_price']);
         $rows[] = $row;
+    }
+
+    foreach ($buyBackByKey as $buyBack) {
+        $product = $productsById[(int)$buyBack['product_id']] ?? null;
+        if (!$product) {
+            continue;
+        }
+        $row = $product;
+        $unitCost = (float)$row['unit_cost'] + (float)$row['commission_amount'];
+        $buyBackAmount = (float)$buyBack['amount'];
+        $buyBackQty = (float)$buyBack['qty'];
+        $soldQty = -$buyBackQty;
+        $netSales = -$buyBackAmount;
+        $totalCost = $soldQty * $unitCost;
+        $row['team_id'] = (int)$buyBack['team_id'];
+        $row['team_name'] = (string)$buyBack['team_name'];
+        $row['selling_price'] = (float)$row['catalog_selling_price'];
+        $row['sold_qty'] = $soldQty;
+        $row['sold_amount'] = 0;
+        $row['discount_amount'] = 0;
+        $row['buy_back_qty'] = $buyBackQty;
+        $row['buy_back_amount'] = $buyBackAmount;
+        $row['transactions'] = $buyBack['transactions'] ?? [];
+        $row['net_sales'] = $netSales;
+        $row = array_merge($row, pc_payment_fields_from_transactions($row['transactions'], $netSales));
+        $row['total_original_cost'] = $soldQty * (float)$row['original_cost'];
+        $row['total_supplier_cost'] = $soldQty * (float)$row['supplier_cost'];
+        $row['total_shipping_cost'] = $soldQty * (float)$row['shipping_cost'];
+        $row['total_other_costs'] = $soldQty * (float)$row['other_costs'];
+        $row['total_marketing_cost'] = $soldQty * (float)$row['marketing_cost'];
+        $row['total_commission_amount'] = $soldQty * (float)$row['commission_amount'];
+        $row['total_cost'] = $totalCost;
+        $row['gross_profit'] = $netSales - $totalCost;
+        $row['profit_margin'] = abs($netSales) > 0.0001 ? ($netSales / $netSales) * 100 : 0;
+        $row['missing_cost'] = $unitCost <= 0;
+        unset($row['catalog_selling_price']);
+        $rows[] = $row;
+    }
+
+    if ($includeUnsold) {
+        $soldIdsInRows = [];
+        foreach ($rows as $existing) {
+            $soldIdsInRows[(int)$existing['product_id']] = true;
+        }
+        if ($teamIds) {
+            $stmtSoldAll = $pdo->prepare("
+                SELECT DISTINCT oi.product_id
+                FROM offline_sale_order_items oi
+                JOIN offline_sale_orders o ON o.id = oi.order_id
+                WHERE DATE(o.sale_date) BETWEEN ? AND ?
+                  AND LOWER(COALESCE(o.status, '')) NOT IN ('cancelled', 'canceled')
+                  AND oi.product_id IS NOT NULL
+            ");
+            $stmtSoldAll->execute([$from, $to]);
+            foreach ($stmtSoldAll->fetchAll(PDO::FETCH_COLUMN) as $soldPid) {
+                $soldIdsInRows[(int)$soldPid] = true;
+            }
+        }
+        foreach ($productsById as $pid => $product) {
+            if (isset($soldIdsInRows[(int)$pid])) {
+                continue;
+            }
+            $row = $product;
+            $unitCost = (float)$row['unit_cost'] + (float)$row['commission_amount'];
+            $row['team_id'] = 0;
+            $row['team_name'] = 'Unassigned';
+            $row['selling_price'] = (float)$row['catalog_selling_price'];
+            $row['sold_qty'] = 0;
+            $row['sold_amount'] = 0;
+            $row['discount_amount'] = 0;
+            $row['transactions'] = [];
+            $row['net_sales'] = 0;
+            $row['paid_net_sales'] = 0;
+            $row['unpaid_net_sales'] = 0;
+            $row['total_original_cost'] = 0;
+            $row['total_supplier_cost'] = 0;
+            $row['total_shipping_cost'] = 0;
+            $row['total_other_costs'] = 0;
+            $row['total_marketing_cost'] = 0;
+            $row['total_commission_amount'] = 0;
+            $row['total_cost'] = 0;
+            $row['gross_profit'] = 0;
+            $row['profit_margin'] = 0;
+            $row['missing_cost'] = $unitCost <= 0;
+            unset($row['catalog_selling_price']);
+            $rows[] = $row;
+        }
     }
 
     usort($rows, static function (array $a, array $b): int {
@@ -475,11 +711,14 @@ function opc_load(PDO $pdo): void
         }, $rows);
     }
 
+    $paymentSummary = pc_summary_payment_nets($rows);
     $summary = [
         'products' => count($rows),
         'missing_cost' => count(array_filter($rows, static fn(array $row): bool => (bool)$row['missing_cost'])),
         'sold_qty' => array_sum(array_map(static fn(array $row): float => (float)$row['sold_qty'], $rows)),
         'net_sales' => array_sum(array_map(static fn(array $row): float => (float)$row['net_sales'], $rows)),
+        'paid_net_sales' => $paymentSummary['paid_net_sales'],
+        'balance_net_sales' => $paymentSummary['balance_net_sales'],
         'total_original_cost' => array_sum(array_map(static fn(array $row): float => (float)$row['total_original_cost'], $rows)),
         'total_supplier_cost' => array_sum(array_map(static fn(array $row): float => (float)$row['total_supplier_cost'], $rows)),
         'total_shipping_cost' => array_sum(array_map(static fn(array $row): float => (float)$row['total_shipping_cost'], $rows)),
@@ -495,9 +734,13 @@ function opc_load(PDO $pdo): void
         'month' => $month,
         'from' => $from,
         'to' => $to,
+        'locked' => false,
+        'lock' => null,
         'summary' => $summary,
         'rows' => $summaryOnly ? [] : $rows,
-        'options' => $summaryOnly ? [] : ['brands' => $brands, 'teams' => $teams],
+        'options' => $summaryOnly ? [] : pc_checkbox_options($brands, $brandCounts, $paymentOrders, [
+            'teams' => ['rows' => $teams, 'counts' => $teamCounts],
+        ]),
     ]);
 }
 
@@ -507,13 +750,15 @@ function opc_save(PDO $pdo): void
     opc_ensure_schema($pdo);
 
     $input = opc_input();
+    pc_lock_handle_action($pdo, 'offline', $input);
     $month = opc_month($input['month_year'] ?? null);
+    pc_lock_assert_open($pdo, 'offline', $month);
     $productId = (int)($input['product_id'] ?? 0);
     if ($productId <= 0) {
         api_error('Invalid product.', 422);
     }
 
-    $selling = max(0, opc_num($input['selling_price'] ?? 0));
+    $selling = pc_product_menu_selling_price($pdo, $productId, $month);
     $original = max(0, opc_num($input['original_cost'] ?? 0));
     $supplier = max(0, opc_num($input['supplier_cost'] ?? 0));
     $shipping = max(0, opc_num($input['shipping_cost'] ?? 0));
@@ -530,7 +775,6 @@ function opc_save(PDO $pdo): void
             (product_id, month_year, selling_price, original_cost, supplier_cost, shipping_cost, other_costs, marketing_cost, offline_commission_amount, notes, updated_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
-            selling_price = VALUES(selling_price),
             original_cost = VALUES(original_cost),
             supplier_cost = VALUES(supplier_cost),
             shipping_cost = VALUES(shipping_cost),

@@ -117,11 +117,14 @@ function dpc_ensure_schema(PDO $pdo): void
 function dpc_load(PDO $pdo): void
 {
     require_role_or_permission(['admin'], 'sr_dealer_product_costing.view', 'product_costs.view');
+    pc_previous_cost_respond($pdo, 'dealer');
     pc_history_ensure_schema($pdo);
 
     [$from, $to, $month] = dpc_request_range();
+    pc_lock_respond_if_locked($pdo, 'dealer', $month);
     $q = trim((string)($_GET['q'] ?? ''));
     $brandIds = dpc_brand_ids($_GET['brand_ids'] ?? $_GET['brand_id'] ?? '');
+    $dealerIds = pc_brand_ids($_GET['dealer_ids'] ?? '');
 
     $brands = $pdo->query("
         SELECT id AS value, name AS label, color AS brand_color
@@ -130,8 +133,23 @@ function dpc_load(PDO $pdo): void
         ORDER BY name
     ")->fetchAll(PDO::FETCH_ASSOC);
 
+    $dealers = $pdo->query("
+        SELECT id AS value, name AS label
+        FROM dealers
+        WHERE LOWER(COALESCE(status, 'active')) = 'active'
+        ORDER BY name
+    ")->fetchAll(PDO::FETCH_ASSOC);
+
+    $soldWhere = [
+        "LOWER(COALESCE(o.status, '')) NOT IN ('draft', 'cancel', 'cancelled', 'canceled', 'return', 'returned')",
+        'DATE(o.order_date) BETWEEN ? AND ?',
+    ];
+    $soldParams = [$from, $to];
+    $soldWhereSql = implode(' AND ', $soldWhere);
+
     $soldStmt = $pdo->prepare("
         SELECT oi.order_id, o.order_code,
+            COALESCE(o.dealer_id, 0) AS dealer_id,
             COALESCE(NULLIF(d.name, ''), o.dealer_name, '') AS customer_name,
             COALESCE(NULLIF(o.sales_person, ''), u.name, u.username, '') AS seller_name,
             p.id AS product_id, p.name AS product_name,
@@ -145,6 +163,8 @@ function dpc_load(PDO $pdo): void
                 THEN oi.quantity / totals.qty_total * COALESCE(o.delivery_fee, 0)
                 ELSE 0 END AS line_delivery,
             COALESCE(o.payment_status, 'unpaid') AS payment_status,
+            COALESCE(o.paid_amount, 0) AS paid_amount,
+            COALESCE(o.grand_total, 0) AS grand_total,
             o.order_date AS printed_at
         FROM dealer_order_items oi
         JOIN dealer_orders o ON o.id = oi.order_id
@@ -152,11 +172,10 @@ function dpc_load(PDO $pdo): void
         LEFT JOIN dealers d ON d.id = o.dealer_id
         LEFT JOIN users u ON u.id = o.created_by
         LEFT JOIN (SELECT order_id, SUM(line_total) AS net_total, SUM(quantity) AS qty_total FROM dealer_order_items GROUP BY order_id) totals ON totals.order_id = o.id
-        WHERE LOWER(COALESCE(o.status, '')) NOT IN ('draft', 'cancel', 'cancelled', 'canceled', 'return', 'returned')
-          AND DATE(o.order_date) BETWEEN ? AND ?
+        WHERE {$soldWhereSql}
         ORDER BY o.order_date DESC, oi.order_id DESC, oi.id ASC
     ");
-    $soldStmt->execute([$from, $to]);
+    $soldStmt->execute($soldParams);
     $soldItems = $soldStmt->fetchAll(PDO::FETCH_ASSOC);
 
     $setNames = [];
@@ -241,6 +260,9 @@ function dpc_load(PDO $pdo): void
         ];
     };
 
+    $paymentOrders = ['paid' => [], 'unpaid' => [], 'partial' => []];
+    $paymentNetByProduct = [];
+    $dealerProducts = [];
     foreach ($soldItems as $row) {
         $qty = (float)($row['quantity'] ?? 0);
         if ($qty <= 0) {
@@ -249,8 +271,21 @@ function dpc_load(PDO $pdo): void
         $lineTotal = (float)($row['line_total'] ?? 0);
         $lineDiscount = (float)($row['line_discount'] ?? 0);
         $lineDelivery = (float)($row['line_delivery'] ?? 0);
-        $rawStatus = strtolower(trim((string)($row['payment_status'] ?? 'unpaid')));
-        $paymentStatus = in_array($rawStatus, ['paid', 'partial', 'credit'], true) ? $rawStatus : 'unpaid';
+        $paymentStatus = pc_bucket_payment_status(
+            (string)($row['payment_status'] ?? ''),
+            (float)($row['paid_amount'] ?? 0),
+            (float)($row['grand_total'] ?? 0)
+        );
+        $paymentAllowed = pc_payment_status_allowed($paymentStatus);
+        $dealerId = (int)($row['dealer_id'] ?? 0);
+        $dealerAllowed = !$dealerIds || in_array($dealerId, $dealerIds, true);
+        $trackDealer = static function (array $source) use (&$dealerProducts, &$paymentOrders, $dealerId, $paymentStatus, $paymentAllowed): void {
+            $productId = (int)($source['product_id'] ?? 0);
+            pc_note_payment_order($paymentOrders, $paymentStatus, $productId);
+            if ($paymentAllowed && $dealerId > 0 && $productId > 0) {
+                $dealerProducts[$dealerId][$productId] = true;
+            }
+        };
         $context = [
             'order_id' => (int)($row['order_id'] ?? 0),
             'order_code' => (string)($row['order_code'] ?? ''),
@@ -279,17 +314,36 @@ function dpc_load(PDO $pdo): void
                     }
                     $weight = max($componentQty * (float)($component['unit_cost'] ?? 0), $componentQty);
                     $ratio = $weight / $weightTotal;
-                    $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $lineDelivery * $ratio, $context);
+                    $trackDealer($component);
+                    if ($dealerAllowed) {
+                        pc_add_product_payment_net($paymentNetByProduct, (int)($component['product_id'] ?? 0), $paymentStatus, max(0, ($lineTotal - $lineDiscount + $lineDelivery) * $ratio));
+                    }
+                    if ($paymentAllowed && $dealerAllowed) {
+                        $addSold($component, $qty * $componentQty, $lineTotal * $ratio, $lineDiscount * $ratio, $lineDelivery * $ratio, $context);
+                    }
                 }
                 continue;
             }
         }
 
-        $addSold($row, $qty, $lineTotal, $lineDiscount, $lineDelivery, $context);
+        $trackDealer($row);
+        if ($dealerAllowed) {
+            pc_add_product_payment_net($paymentNetByProduct, (int)($row['product_id'] ?? 0), $paymentStatus, max(0, $lineTotal - $lineDiscount + $lineDelivery));
+        }
+        if ($paymentAllowed && $dealerAllowed) {
+            $addSold($row, $qty, $lineTotal, $lineDiscount, $lineDelivery, $context);
+        }
+    }
+
+    $dealerCounts = [];
+    foreach ($dealerProducts as $id => $products) {
+        $dealerCounts[(int)$id] = count($products);
     }
 
     $soldProductIds = array_keys($soldByProduct);
-    if (!$soldProductIds) {
+    $scopeProductIds = pc_scope_product_ids($soldProductIds, $paymentNetByProduct);
+    $includeUnsold = pc_include_unsold();
+    if (!$scopeProductIds && !$includeUnsold) {
         api_json([
             'success' => true,
             'month' => $month,
@@ -300,28 +354,31 @@ function dpc_load(PDO $pdo): void
                 'missing_cost' => 0,
                 'sold_qty' => 0,
                 'net_sales' => 0,
+                'paid_net_sales' => 0,
+                'balance_net_sales' => 0,
                 'total_cost' => 0,
                 'gross_profit' => 0,
             ],
             'rows' => [],
-            'options' => ['brands' => $brands],
+            'options' => pc_checkbox_options($brands, [], $paymentOrders, [
+                'dealers' => ['rows' => $dealers, 'counts' => $dealerCounts],
+            ]),
         ]);
     }
 
     $productWhere = [
-        'p.id IN (' . implode(',', array_fill(0, count($soldProductIds), '?')) . ')',
         'COALESCE(p.active, 1) = 1',
         "LOWER(COALESCE(p.product_type, 'normal')) <> 'set'",
     ];
-    $productParams = array_merge([$month], $soldProductIds);
+    $productParams = [$month];
+    if (!$includeUnsold) {
+        $productWhere[] = 'p.id IN (' . implode(',', array_fill(0, count($scopeProductIds), '?')) . ')';
+        array_push($productParams, ...$scopeProductIds);
+    }
     if ($q !== '') {
         $productWhere[] = '(p.name LIKE ? OR COALESCE(p.sku, \'\') LIKE ? OR COALESCE(b.name, \'\') LIKE ?)';
         $like = '%' . $q . '%';
         array_push($productParams, $like, $like, $like);
-    }
-    if ($brandIds) {
-        $productWhere[] = 'p.brand_id IN (' . implode(',', array_fill(0, count($brandIds), '?')) . ')';
-        array_push($productParams, ...$brandIds);
     }
     $productWhereSql = 'WHERE ' . implode(' AND ', $productWhere);
 
@@ -360,8 +417,10 @@ function dpc_load(PDO $pdo): void
     ");
     $stmt->execute($productParams);
     $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    $brandCounts = pc_count_brands($rows);
+    $rows = pc_filter_rows_by_brand($rows, $brandIds);
 
-    $rows = array_map(static function (array $row) use ($soldByProduct): array {
+    $rows = array_map(static function (array $row) use ($soldByProduct, $paymentNetByProduct): array {
         $sold = $soldByProduct[(int)$row['product_id']] ?? ['sold_qty' => 0, 'sold_amount' => 0, 'discount_amount' => 0, 'delivery_amount' => 0];
         $unitCost = (float)$row['unit_cost'] + (float)$row['commission_amount'];
         $soldQty = (float)$sold['sold_qty'];
@@ -376,6 +435,7 @@ function dpc_load(PDO $pdo): void
         $totalCost = $soldQty * $unitCost;
         $grossProfit = $netSales - $totalCost;
         $row['net_sales'] = $netSales;
+        $row = array_merge($row, pc_payment_fields_from_transactions($row['transactions'], $netSales));
         $row['total_cost'] = $totalCost;
         $row['gross_profit'] = $grossProfit;
         $row['profit_margin'] = $netSales > 0 ? ($grossProfit / $netSales) * 100 : 0;
@@ -395,11 +455,21 @@ function dpc_load(PDO $pdo): void
         return $row;
     }, $rows);
 
+    if (pc_payment_statuses() !== null && !$includeUnsold) {
+        $rows = array_values(array_filter(
+            $rows,
+            static fn(array $row): bool => (float)($row['sold_qty'] ?? 0) > 0
+        ));
+    }
+
+    $paymentSummary = pc_summary_payment_nets($rows);
     $summary = [
         'products' => count($rows),
         'missing_cost' => count(array_filter($rows, static fn(array $row): bool => (bool)$row['missing_cost'])),
         'sold_qty' => array_sum(array_map(static fn(array $row): float => (float)$row['sold_qty'], $rows)),
         'net_sales' => array_sum(array_map(static fn(array $row): float => (float)$row['net_sales'], $rows)),
+        'paid_net_sales' => $paymentSummary['paid_net_sales'],
+        'balance_net_sales' => $paymentSummary['balance_net_sales'],
         'total_cost' => array_sum(array_map(static fn(array $row): float => (float)$row['total_cost'], $rows)),
         'gross_profit' => array_sum(array_map(static fn(array $row): float => (float)$row['gross_profit'], $rows)),
     ];
@@ -409,9 +479,13 @@ function dpc_load(PDO $pdo): void
         'month' => $month,
         'from' => $from,
         'to' => $to,
+        'locked' => false,
+        'lock' => null,
         'summary' => $summary,
         'rows' => $rows,
-        'options' => ['brands' => $brands],
+        'options' => pc_checkbox_options($brands, $brandCounts, $paymentOrders, [
+            'dealers' => ['rows' => $dealers, 'counts' => $dealerCounts],
+        ]),
     ]);
 }
 
@@ -420,13 +494,15 @@ function dpc_save(PDO $pdo): void
     require_role_or_permission(['admin'], 'sr_dealer_product_costing.update', 'product_costs.update');
 
     $input = dpc_input();
+    pc_lock_handle_action($pdo, 'dealer', $input);
     $month = dpc_month($input['month_year'] ?? null);
+    pc_lock_assert_open($pdo, 'dealer', $month);
     $productId = (int)($input['product_id'] ?? 0);
     if ($productId <= 0) {
         api_error('Invalid product.', 422);
     }
 
-    $selling = max(0, dpc_num($input['selling_price'] ?? 0));
+    $selling = pc_product_menu_selling_price($pdo, $productId, $month);
     $original = max(0, dpc_num($input['original_cost'] ?? 0));
     $supplier = max(0, dpc_num($input['supplier_cost'] ?? 0));
     $shipping = max(0, dpc_num($input['shipping_cost'] ?? 0));
@@ -443,7 +519,6 @@ function dpc_save(PDO $pdo): void
             (product_id, month_year, selling_price, original_cost, supplier_cost, shipping_cost, other_costs, marketing_cost, dealer_commission_amount, notes, updated_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
-            selling_price = VALUES(selling_price),
             original_cost = VALUES(original_cost),
             supplier_cost = VALUES(supplier_cost),
             shipping_cost = VALUES(shipping_cost),
