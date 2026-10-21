@@ -551,7 +551,7 @@ function opc_load(PDO $pdo): void
         if ($buyBack) {
             unset($buyBackByKey[$saleKey]);
         }
-        $soldQty = $saleQty - $buyBackQty;
+        $soldQty = $saleQty;
         $netSales = $soldAmount - $discount - $buyBackAmount;
         $avgSelling = $saleQty > 0
             ? ((float)$sold['price_amount'] / $saleQty)
@@ -593,9 +593,9 @@ function opc_load(PDO $pdo): void
         $unitCost = (float)$row['unit_cost'] + (float)$row['commission_amount'];
         $buyBackAmount = (float)$buyBack['amount'];
         $buyBackQty = (float)$buyBack['qty'];
-        $soldQty = -$buyBackQty;
+        $soldQty = 0;
         $netSales = -$buyBackAmount;
-        $totalCost = $soldQty * $unitCost;
+        $totalCost = 0;
         $row['team_id'] = (int)$buyBack['team_id'];
         $row['team_name'] = (string)$buyBack['team_name'];
         $row['selling_price'] = (float)$row['catalog_selling_price'];

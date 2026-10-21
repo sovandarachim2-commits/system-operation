@@ -35,7 +35,14 @@ function pcur_user_label(?array $user): string
     return trim((string)(($user['name'] ?? '') ?: ($user['username'] ?? '')));
 }
 
-$pdo = db();
+function pcur_input(): array
+{
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw ?: '{}', true);
+    return is_array($data) ? $data : [];
+}
+
+$pdo = get_db_connection();
 pcur_ensure_schema($pdo);
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
     require_role_or_permission(['admin'], 'sr_unlock_requests.view');
@@ -50,7 +57,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
     api_json(['success' => true, 'requests' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
 }
 
-$input = pc_input();
+$input = pcur_input();
 $action = trim((string)($input['action'] ?? ''));
 $user = current_user() ?: [];
 $userId = isset($user['id']) ? (int)$user['id'] : null;
