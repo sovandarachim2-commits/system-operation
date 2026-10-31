@@ -2,21 +2,38 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../auth.php';
-$origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+$origin = (string)($_SERVER['HTTP_ORIGIN'] ?? '');
 $allowedOrigins = $API_ALLOWED_ORIGINS ?? [];
 if (!is_array($allowedOrigins)) {
     $allowedOrigins = [];
 }
+$isAllowedOrigin = false;
+if ($origin !== '') {
+    $parsed = parse_url($origin);
+    $host = strtolower((string)($parsed['host'] ?? ''));
+    if (
+        $host === 'localhost'
+        || $host === '127.0.0.1'
+        || preg_match('/^192\.168\.\d+\.\d+$/', $host)
+        || preg_match('/^10\.\d+\.\d+\.\d+$/', $host)
+        || substr($host, -11) === '.vercel.app'
+        || substr($host, -21) === 'rentroomcambodia.com'
+        || in_array($origin, $allowedOrigins, true)
+    ) {
+        $isAllowedOrigin = true;
+    }
+}
 
-if (in_array($origin, $allowedOrigins, true)) {
+if ($isAllowedOrigin) {
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Access-Control-Allow-Credentials: true');
     header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, Accept, Cache-Control, Authorization, X-Report-Token, X-Frontend-URL');
-    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+    header('Access-Control-Max-Age: 86400');
     header('Vary: Origin');
 }
 
-if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? '')) === 'OPTIONS') {
     http_response_code(204);
     exit;
 }

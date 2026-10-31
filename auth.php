@@ -36,8 +36,6 @@ function auth_start_session(): void
     session_start();
 }
 
-auth_start_session();
-
 /**
  * Cross-origin System Report (Vercel) support:
  * - Restore session from report token when PHP session cookie is missing.
@@ -46,23 +44,44 @@ auth_start_session();
 function auth_apply_report_cors(): void
 {
     $origin = (string)($_SERVER['HTTP_ORIGIN'] ?? '');
+    if ($origin === '') {
+        return;
+    }
     $allowed = $GLOBALS['API_ALLOWED_ORIGINS'] ?? [];
     if (!is_array($allowed)) {
         $allowed = [];
     }
-    if ($origin === '' || !in_array($origin, $allowed, true)) {
+    $isAllowedOrigin = false;
+    $parsed = parse_url($origin);
+    $host = strtolower((string)($parsed['host'] ?? ''));
+    if (
+        $host === 'localhost'
+        || $host === '127.0.0.1'
+        || preg_match('/^192\.168\.\d+\.\d+$/', $host)
+        || preg_match('/^10\.\d+\.\d+\.\d+$/', $host)
+        || substr($host, -11) === '.vercel.app'
+        || substr($host, -21) === 'rentroomcambodia.com'
+        || in_array($origin, $allowed, true)
+    ) {
+        $isAllowedOrigin = true;
+    }
+    if (!$isAllowedOrigin) {
         return;
     }
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Access-Control-Allow-Credentials: true');
     header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, Accept, Cache-Control, Authorization, X-Report-Token, X-Frontend-URL');
-    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+    header('Access-Control-Max-Age: 86400');
     header('Vary: Origin');
     if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? '')) === 'OPTIONS') {
         http_response_code(204);
         exit;
     }
 }
+
+auth_apply_report_cors();
+auth_start_session();
 
 function auth_restore_user_from_report_token(): void
 {
@@ -110,7 +129,6 @@ function auth_restore_user_from_report_token(): void
     }
 }
 
-auth_apply_report_cors();
 auth_restore_user_from_report_token();
 
 /**

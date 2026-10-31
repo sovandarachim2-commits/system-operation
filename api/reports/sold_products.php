@@ -115,6 +115,7 @@ try {
     $sellerId = filter_var($_GET['seller_id'] ?? null, FILTER_VALIDATE_INT);
     $categoryId = filter_var($_GET['category_id'] ?? null, FILTER_VALIDATE_INT);
     $paymentStatus = sold_payment_status();
+    $includeCost = (string)($_GET['include_cost'] ?? '1') !== '0';
 
     $where = ['COALESCE(o.is_cancelled, 0) = 0'];
     $params = [];
@@ -125,11 +126,11 @@ try {
         array_push($params, $like, $like, $like, $like, $like, $like);
     }
     if ($from !== null) {
-        $where[] = 'DATE(pj.printed_at) >= ?';
-        $params[] = $from;
+        $where[] = 'pj.printed_at >= ?';
+        $params[] = $from . ' 00:00:00';
     }
     if ($to !== null) {
-        $where[] = 'DATE(pj.printed_at) <= ?';
+        $where[] = 'pj.printed_at < DATE_ADD(?, INTERVAL 1 DAY)';
         $params[] = $to;
     }
     if ($productId !== false && $productId !== null) {
@@ -161,18 +162,58 @@ try {
     }
 
     $whereSql = 'WHERE ' . implode(' AND ', $where);
+    $pdo->exec('DROP TEMPORARY TABLE IF EXISTS tmp_sold_print_latest');
+    $pdo->exec('DROP TEMPORARY TABLE IF EXISTS tmp_sold_print_latest_totals');
+    $pdo->exec('CREATE TEMPORARY TABLE tmp_sold_print_latest (
+        order_id INT NOT NULL PRIMARY KEY,
+        printed_at DATETIME NULL,
+        KEY idx_sold_print_latest_printed (printed_at)
+    )');
+    $pdo->exec('INSERT INTO tmp_sold_print_latest (order_id, printed_at)
+        SELECT order_id, MAX(printed_at) FROM print_jobs GROUP BY order_id');
+    $pdo->exec('CREATE TEMPORARY TABLE tmp_sold_print_latest_totals (
+        order_id INT NOT NULL PRIMARY KEY,
+        printed_at DATETIME NULL,
+        KEY idx_sold_print_totals_printed (printed_at)
+    )');
+    $pdo->exec('INSERT INTO tmp_sold_print_latest_totals (order_id, printed_at)
+        SELECT order_id, printed_at FROM tmp_sold_print_latest');
     $baseJoins = "
         FROM order_items oi
         JOIN orders o ON oi.order_id = o.id
         JOIN products p ON oi.product_id = p.id
         LEFT JOIN brands b ON b.id = p.brand_id
         LEFT JOIN users u ON u.id = o.seller_id
-        INNER JOIN (
-            SELECT order_id, MAX(printed_at) AS printed_at
-            FROM print_jobs
-            GROUP BY order_id
-        ) pj ON pj.order_id = o.id
+        INNER JOIN tmp_sold_print_latest pj ON pj.order_id = o.id
     ";
+    $orderTotalsParams = [];
+    $orderTotalsWhere = [];
+    if ($from !== null) {
+        $orderTotalsWhere[] = 'pj_tot.printed_at >= ?';
+        $orderTotalsParams[] = $from . ' 00:00:00';
+    }
+    if ($to !== null) {
+        $orderTotalsWhere[] = 'pj_tot.printed_at < DATE_ADD(?, INTERVAL 1 DAY)';
+        $orderTotalsParams[] = $to;
+    }
+    $orderTotalsJoin = $orderTotalsWhere
+        ? "
+        LEFT JOIN (
+            SELECT oi_tot.order_id, SUM(oi_tot.line_total) AS order_line_total
+            FROM order_items oi_tot
+            INNER JOIN tmp_sold_print_latest_totals pj_tot ON pj_tot.order_id = oi_tot.order_id
+            WHERE " . implode(' AND ', $orderTotalsWhere) . "
+            GROUP BY oi_tot.order_id
+        ) order_totals ON order_totals.order_id = oi.order_id
+        "
+        : "
+        LEFT JOIN (
+            SELECT order_id, SUM(line_total) AS order_line_total
+            FROM order_items
+            GROUP BY order_id
+        ) order_totals ON order_totals.order_id = oi.order_id
+        ";
+    $soldQueryParams = array_merge($orderTotalsParams, $params);
 
     $dailyStmt = $pdo->prepare("
         SELECT
@@ -202,16 +243,12 @@ try {
             MAX(pj.printed_at) AS last_sold_at
         {$baseJoins}
         LEFT JOIN delivery_costs dc ON o.delivery_cost_id = dc.id
-        LEFT JOIN (
-            SELECT order_id, SUM(line_total) AS order_line_total
-            FROM order_items
-            GROUP BY order_id
-        ) order_totals ON order_totals.order_id = oi.order_id
+        {$orderTotalsJoin}
         {$whereSql}
           AND COALESCE(o.is_returned, 0) = 0
         GROUP BY oi.product_id
     ");
-    $dailyStmt->execute($params);
+    $dailyStmt->execute($soldQueryParams);
     $dailyProducts = $dailyStmt->fetchAll(PDO::FETCH_ASSOC);
 
     $returnStmt = $pdo->prepare("
@@ -291,16 +328,12 @@ try {
             ) AS line_discount,
             pj.printed_at
         {$baseJoins}
-        LEFT JOIN (
-            SELECT order_id, SUM(line_total) AS order_line_total
-            FROM order_items
-            GROUP BY order_id
-        ) order_totals ON order_totals.order_id = oi.order_id
+        {$orderTotalsJoin}
         {$whereSql}
           AND COALESCE(o.is_returned, 0) = 0
         ORDER BY pj.printed_at DESC, oi.order_id DESC, oi.id ASC
     ");
-    $detailStmt->execute($params);
+    $detailStmt->execute($soldQueryParams);
     $soldItems = $detailStmt->fetchAll(PDO::FETCH_ASSOC);
 
     $setNames = [];
@@ -506,7 +539,7 @@ try {
     unset($detail);
 
     $costByProduct = [];
-    if ($detailIds && sold_product_cost_table_exists($pdo)) {
+    if ($includeCost && $detailIds && sold_product_cost_table_exists($pdo)) {
         $hasMarketingCost = sold_product_cost_column_exists($pdo, 'marketing_cost');
         $marketingSelect = $hasMarketingCost ? 'COALESCE(marketing_cost, 0)' : '0';
         $placeholders = implode(',', array_fill(0, count($detailIds), '?'));
@@ -589,6 +622,7 @@ try {
             o.id,
             o.order_code,
             o.customer_name,
+            MAX(COALESCE(o.phone, '')) AS customer_phone,
             o.total_amount,
             o.discount,
             o.status,
@@ -598,20 +632,21 @@ try {
             o.payment_method,
             pj.printed_at,
             COALESCE(u.name, u.username, 'N/A') AS seller_name,
+            MAX(COALESCE(dt.name, '')) AS delivery_type_name,
+            MAX(COALESCE(dc.label, '')) AS delivery_cost_label,
+            MAX(COALESCE(dc.amount, 0)) AS delivery_cost_amount,
             COUNT(oi.id) AS item_count,
             COALESCE(SUM(oi.quantity), 0) AS total_quantity
         FROM orders o
-        INNER JOIN (
-            SELECT order_id, MAX(printed_at) AS printed_at
-            FROM print_jobs
-            GROUP BY order_id
-        ) pj ON pj.order_id = o.id
+        INNER JOIN tmp_sold_print_latest pj ON pj.order_id = o.id
         LEFT JOIN users u ON o.seller_id = u.id
+        LEFT JOIN delivery_types dt ON dt.id = o.delivery_type_id
+        LEFT JOIN delivery_costs dc ON dc.id = o.delivery_cost_id
         LEFT JOIN order_items oi ON o.id = oi.order_id
         LEFT JOIN products p ON oi.product_id = p.id
         LEFT JOIN brands b ON b.id = p.brand_id
-        WHERE DATE(pj.printed_at) " . ($from !== null ? ">= ?" : ">= DATE('1970-01-01')") . "
-          " . ($to !== null ? "AND DATE(pj.printed_at) <= ?" : "") . "
+        WHERE pj.printed_at " . ($from !== null ? ">= ?" : ">= '1970-01-01 00:00:00'") . "
+          " . ($to !== null ? "AND pj.printed_at < DATE_ADD(?, INTERVAL 1 DAY)" : "") . "
           " . ($q !== '' ? "AND (o.order_code LIKE ? OR o.customer_name LIKE ? OR p.name LIKE ?)" : "") . "
           " . (($productId !== false && $productId !== null) ? "AND oi.product_id = ?" : "") . "
           " . (($brandId !== false && $brandId !== null) ? "AND p.brand_id = ?" : "") . "
@@ -681,6 +716,30 @@ try {
         }
     }
 
+    $deliveryByCode = [];
+    $orderCodes = [];
+    foreach ($detailedOrders as $deliveryOrder) {
+        $code = trim((string)($deliveryOrder['order_code'] ?? ''));
+        if ($code !== '') {
+            $orderCodes[$code] = $code;
+        }
+    }
+    foreach (array_chunk(array_values($orderCodes), 800) as $codeChunk) {
+        $placeholders = implode(',', array_fill(0, count($codeChunk), '?'));
+        $deliveryStmt = $pdo->prepare("
+            SELECT inv, MAX(delivery_by) AS delivery_by
+            FROM out_items
+            WHERE delivery_by IS NOT NULL
+              AND delivery_by != ''
+              AND inv IN ($placeholders)
+            GROUP BY inv
+        ");
+        $deliveryStmt->execute($codeChunk);
+        foreach ($deliveryStmt->fetchAll(PDO::FETCH_ASSOC) as $deliveryRow) {
+            $deliveryByCode[(string)($deliveryRow['inv'] ?? '')] = (string)($deliveryRow['delivery_by'] ?? '');
+        }
+    }
+
     $detailedSummary = [
         'detailed_total_orders' => 0,
         'detailed_total_items' => 0,
@@ -692,6 +751,7 @@ try {
     ];
     foreach ($detailedOrders as &$order) {
         $orderId = (int)($order['id'] ?? 0);
+        $order['delivery_by'] = $deliveryByCode[(string)($order['order_code'] ?? '')] ?? '';
         $order['products'] = $detailedOrderProducts[$orderId] ?? [];
         $productLines = [];
         foreach ($order['products'] as $product) {

@@ -279,8 +279,12 @@ function dealer_api_next_order_code(PDO $pdo, string $orderDate): string
     return $prefix . str_pad((string)$next, 3, '0', STR_PAD_LEFT);
 }
 
-function dealer_api_fetch(PDO $pdo): array
+function dealer_api_fetch(PDO $pdo, array $options = []): array
 {
+    if (($options['scope'] ?? '') === 'revenue') {
+        return dealer_api_fetch_revenue($pdo, (string)($options['from'] ?? ''), (string)($options['to'] ?? ''));
+    }
+
     $dealers = $pdo->query("
         SELECT
             d.*,
@@ -737,11 +741,98 @@ function dealer_api_save_order(PDO $pdo, array $payload, array $user): void
     }
 }
 
+function dealer_api_fetch_revenue(PDO $pdo, string $from, string $to): array
+{
+    $where = [];
+    $params = [];
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $from)) {
+        $where[] = 'o.order_date >= ?';
+        $params[] = $from;
+    }
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) {
+        $where[] = 'o.order_date <= ?';
+        $params[] = $to;
+    }
+    $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
+    $stmt = $pdo->prepare("
+        SELECT o.*
+        FROM dealer_orders o
+        {$whereSql}
+        ORDER BY o.order_date DESC, o.id DESC
+    ");
+    $stmt->execute($params);
+    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    $ids = array_map(static fn(array $row): int => (int)$row['id'], $orders);
+    $itemsByOrder = [];
+    $paymentsByOrder = [];
+    if ($ids) {
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $itemStmt = $pdo->prepare("SELECT * FROM dealer_order_items WHERE order_id IN ($placeholders) ORDER BY order_id ASC, id ASC");
+        $itemStmt->execute($ids);
+        foreach ($itemStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $itemsByOrder[(int)$row['order_id']][] = [
+                'id' => (int)$row['id'],
+                'product_id' => (string)($row['product_id'] ?? ''),
+                'movement_item_id' => (int)($row['movement_item_id'] ?? 0),
+                'product_name' => (string)($row['product_name'] ?? ''),
+                'warehouse_id' => (string)($row['warehouse_id'] ?? ''),
+                'warehouse_name' => (string)($row['warehouse_name'] ?? ''),
+                'quantity' => (float)$row['quantity'],
+                'dealer_price' => (float)$row['dealer_price'],
+                'discount' => (float)$row['discount'],
+                'line_total' => (float)$row['line_total'],
+            ];
+        }
+
+        $paymentStmt = $pdo->prepare("
+            SELECT p.*, COALESCE(u.name, u.username, '') AS paid_by_name
+            FROM dealer_order_payments p
+            LEFT JOIN users u ON u.id = p.paid_by
+            WHERE p.order_id IN ($placeholders)
+            ORDER BY p.order_id ASC, p.paid_date ASC, p.id ASC
+        ");
+        $paymentStmt->execute($ids);
+        foreach ($paymentStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $paymentsByOrder[(int)$row['order_id']][] = [
+                'id' => (int)$row['id'],
+                'amount' => (float)$row['amount'],
+                'method' => (string)($row['method'] ?? ''),
+                'payment_method' => (string)($row['method'] ?? ''),
+                'reference' => (string)($row['reference'] ?? ''),
+                'note' => (string)($row['note'] ?? ''),
+                'paid_note' => (string)($row['note'] ?? ''),
+                'payment_date' => (string)($row['paid_date'] ?? ''),
+                'paid_date' => (string)($row['paid_date'] ?? ''),
+                'paid_by_name' => (string)($row['paid_by_name'] ?? ''),
+            ];
+        }
+    }
+
+    $orders = array_map(static function (array $order) use ($itemsByOrder, $paymentsByOrder): array {
+        $id = (int)$order['id'];
+        $order['id'] = $id;
+        $order['lines'] = $itemsByOrder[$id] ?? [];
+        $order['payments'] = $paymentsByOrder[$id] ?? [];
+        $order['logs'] = [];
+        return $order;
+    }, $orders);
+
+    return [
+        'dealers' => [],
+        'orders' => $orders,
+        'products' => [],
+        'warehouses' => [],
+    ];
+}
+
 try {
     $pdo = get_db_connection();
-    dealer_api_ensure_schema($pdo);
     $user = current_user() ?: [];
     $action = (string)($_GET['action'] ?? ($_SERVER['REQUEST_METHOD'] === 'POST' ? 'save_order' : 'options'));
+    $scope = (string)($_GET['scope'] ?? '');
+    if ($scope !== 'revenue') {
+        dealer_api_ensure_schema($pdo);
+    }
 
     if ($_SERVER['REQUEST_METHOD'] === 'POST' && $action === 'save_dealer') {
         dealer_api_save_dealer($pdo, dealer_api_input(), $user);
@@ -762,7 +853,11 @@ try {
         'sr_dealer_reports.view',
         'reports_data.view'
     );
-    api_json(['success' => true, ...dealer_api_fetch($pdo)]);
+    api_json(['success' => true, ...dealer_api_fetch($pdo, [
+        'scope' => $scope,
+        'from' => (string)($_GET['from'] ?? ''),
+        'to' => (string)($_GET['to'] ?? ''),
+    ])]);
 } catch (Throwable $e) {
     error_log('dealer_orders API error: ' . $e->getMessage());
     api_error('Unable to process dealer orders: ' . $e->getMessage(), 500);

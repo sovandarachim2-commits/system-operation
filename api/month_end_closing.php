@@ -18,6 +18,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET' && ($_GET['view'] ?? '') ===
 const MEC_STEPS = [
     'sales' => 'Sales Closing',
     'receivable' => 'Accounts Receivable',
+    'ar_dealer' => 'AR Dealer',
     'payable' => 'Accounts Payable',
     'purchase' => 'Purchase / Supplier Closing',
     'cash_bank' => 'Cash & Bank Reconciliation',
@@ -1176,6 +1177,143 @@ function mec_receivable_rows(PDO $pdo, string $from, string $to, bool $includePr
     return $rows;
 }
 
+function mec_dealer_ar_detail_rows(PDO $pdo, array $receivableRows): array
+{
+    if (!api_table_exists($pdo, 'dealer_orders') || !api_table_exists($pdo, 'dealer_order_items')) return [];
+    $orderMap = [];
+    foreach ($receivableRows as $row) {
+        if (strtolower((string)($row['source'] ?? '')) !== 'dealer') continue;
+        $orderId = (int)($row['order_id'] ?? 0);
+        if ($orderId > 0) $orderMap[$orderId] = $row;
+    }
+    if (!$orderMap) return [];
+
+    $orderIds = array_keys($orderMap);
+    $placeholders = implode(',', array_fill(0, count($orderIds), '?'));
+    $quantityColumn = mec_pick($pdo, 'dealer_order_items', ['quantity', 'qty']);
+    $orderIdColumn = mec_pick($pdo, 'dealer_order_items', ['order_id']);
+    $productIdColumn = mec_pick($pdo, 'dealer_order_items', ['product_id']);
+    if (!$quantityColumn || !$orderIdColumn) return [];
+
+    $productIdExpr = 'NULL';
+    if ($productIdColumn) {
+        $productIdExpr = 'CAST(i.' . api_quote_identifier($productIdColumn) . ' AS UNSIGNED)';
+        if (mec_has($pdo, 'dealer_order_items', 'movement_item_id')) {
+            $productIdExpr = 'COALESCE(NULLIF(i.' . api_quote_identifier('movement_item_id') . ', 0), ' . $productIdExpr . ')';
+        }
+    } elseif (mec_has($pdo, 'dealer_order_items', 'movement_item_id')) {
+        $productIdExpr = 'NULLIF(i.' . api_quote_identifier('movement_item_id') . ', 0)';
+    }
+
+    $productNameExpr = "'Item'";
+    $productJoin = '';
+    if (api_table_exists($pdo, 'products')) {
+        $productJoin = 'LEFT JOIN products p ON p.id = ' . $productIdExpr;
+        $productNameExpr = "COALESCE(NULLIF(TRIM(p.name), ''), " . (mec_has($pdo, 'dealer_order_items', 'product_name') ? "NULLIF(TRIM(i.product_name), ''), " : '') . "'Item')";
+    } elseif (mec_has($pdo, 'dealer_order_items', 'product_name')) {
+        $productNameExpr = "COALESCE(NULLIF(TRIM(i.product_name), ''), 'Item')";
+    }
+
+    $orderDateColumn = mec_pick($pdo, 'dealer_orders', ['order_date', 'created_at']);
+    $unitCostExpr = '0';
+    if ($orderDateColumn && api_table_exists($pdo, 'product_costs') && mec_has($pdo, 'product_costs', 'product_id') && mec_has($pdo, 'product_costs', 'month_year')) {
+        $costParts = [];
+        foreach (['original_cost', 'supplier_cost', 'shipping_cost', 'other_costs', 'marketing_cost', 'dealer_commission_amount'] as $column) {
+            if (mec_has($pdo, 'product_costs', $column)) $costParts[] = 'COALESCE(pc.' . api_quote_identifier($column) . ', 0)';
+        }
+        if ($costParts) $unitCostExpr = '(' . implode(' + ', $costParts) . ')';
+    }
+    $costJoin = '';
+    if ($unitCostExpr !== '0' && $orderDateColumn) {
+        $costJoin = "LEFT JOIN product_costs pc ON pc.product_id = $productIdExpr AND pc.month_year = DATE_FORMAT(o." . api_quote_identifier($orderDateColumn) . ", '%Y-%m')";
+    }
+
+    $orderCodeExpr = mec_has($pdo, 'dealer_orders', 'order_code')
+        ? "COALESCE(NULLIF(o.order_code, ''), CONCAT('DL-', o.id))"
+        : "CONCAT('DL-', o.id)";
+    $dateExpr = $orderDateColumn ? 'DATE(o.' . api_quote_identifier($orderDateColumn) . ')' : 'NULL';
+    $statusExpr = mec_has($pdo, 'dealer_orders', 'status') ? "COALESCE(NULLIF(TRIM(o.status), ''), '')" : "''";
+    $paymentStatusExpr = mec_has($pdo, 'dealer_orders', 'payment_status') ? "COALESCE(NULLIF(TRIM(o.payment_status), ''), '')" : "''";
+    $paymentMethodExpr = mec_has($pdo, 'dealer_orders', 'payment_method') ? "COALESCE(NULLIF(TRIM(o.payment_method), ''), '')" : "''";
+    $totalAmountColumn = mec_pick($pdo, 'dealer_orders', ['subtotal', 'total_amount']);
+    $totalAmountExpr = $totalAmountColumn ? 'COALESCE(o.' . api_quote_identifier($totalAmountColumn) . ', 0)' : '0';
+    $discountColumn = mec_pick($pdo, 'dealer_orders', ['discount_total', 'discount']);
+    $discountExpr = $discountColumn ? 'COALESCE(o.' . api_quote_identifier($discountColumn) . ', 0)' : '0';
+    $grandAmountColumn = mec_pick($pdo, 'dealer_orders', ['grand_total', 'total_amount', 'amount']);
+    $grandAmountExpr = $grandAmountColumn ? 'COALESCE(o.' . api_quote_identifier($grandAmountColumn) . ', 0)' : '0';
+    $itemOrderBy = mec_has($pdo, 'dealer_order_items', 'id') ? ', i.id ASC' : '';
+    $items = mec_fetch_rows(
+        $pdo,
+        "SELECT i." . api_quote_identifier($orderIdColumn) . " AS order_id,
+                $orderCodeExpr AS order_code,
+                $dateExpr AS order_date,
+                $statusExpr AS order_status,
+                $paymentStatusExpr AS payment_status,
+                $paymentMethodExpr AS payment_method,
+                $totalAmountExpr AS total_amount,
+                $discountExpr AS discount,
+                $grandAmountExpr AS grand_amount,
+                $productNameExpr AS product_name,
+                COALESCE(i." . api_quote_identifier($quantityColumn) . ", 0) AS quantity,
+                $unitCostExpr AS unit_cost,
+                COALESCE(i." . api_quote_identifier($quantityColumn) . ", 0) * $unitCostExpr AS total_cost
+         FROM dealer_order_items i
+         JOIN dealer_orders o ON o.id = i." . api_quote_identifier($orderIdColumn) . "
+         $productJoin
+         $costJoin
+         WHERE i." . api_quote_identifier($orderIdColumn) . " IN ($placeholders)
+         ORDER BY $dateExpr DESC, o.id DESC$itemOrderBy",
+        $orderIds
+    );
+
+    $result = [];
+    $seenOrders = [];
+    foreach ($items as $item) {
+        $orderId = (int)($item['order_id'] ?? 0);
+        $receivable = $orderMap[$orderId] ?? null;
+        if (!$receivable) continue;
+        $seenOrders[$orderId] = true;
+        $result[] = [
+            'order_id' => $orderId,
+            'order_code' => (string)($receivable['invoice'] ?? $item['order_code'] ?? ''),
+            'order_name' => (string)($receivable['customer'] ?? ''),
+            'order_date' => (string)($receivable['invoice_date'] ?? $item['order_date'] ?? ''),
+            'outstanding' => (float)($receivable['outstanding'] ?? 0),
+            'status' => (string)($item['order_status'] ?? ''),
+            'payment_status' => (string)($item['payment_status'] ?? ''),
+            'payment_method' => (string)($item['payment_method'] ?? ''),
+            'total_amount' => (float)($item['total_amount'] ?? 0),
+            'discount' => (float)($item['discount'] ?? 0),
+            'grand_amount' => (float)($item['grand_amount'] ?? 0),
+            'product_name' => (string)($item['product_name'] ?? 'Item'),
+            'quantity' => (float)($item['quantity'] ?? 0),
+            'unit_cost' => (float)($item['unit_cost'] ?? 0),
+            'total_cost' => (float)($item['total_cost'] ?? 0),
+        ];
+    }
+    foreach ($orderMap as $orderId => $receivable) {
+        if (isset($seenOrders[$orderId])) continue;
+        $result[] = [
+            'order_id' => (int)$orderId,
+            'order_code' => (string)($receivable['invoice'] ?? ''),
+            'order_name' => (string)($receivable['customer'] ?? ''),
+            'order_date' => (string)($receivable['invoice_date'] ?? ''),
+            'outstanding' => (float)($receivable['outstanding'] ?? 0),
+            'status' => '',
+            'payment_status' => '',
+            'payment_method' => '',
+            'total_amount' => 0,
+            'discount' => 0,
+            'grand_amount' => 0,
+            'product_name' => 'No product details',
+            'quantity' => 0,
+            'unit_cost' => 0,
+            'total_cost' => 0,
+        ];
+    }
+    return $result;
+}
+
 function mec_prior_ar_collections(PDO $pdo, string $from, string $to): array
 {
     $rows = [];
@@ -1820,6 +1958,15 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
 
     $receivableRows = mec_receivable_rows($pdo, $from, $to, $includePreviousAr);
     $receivableSummary = mec_receivable_summary($receivableRows);
+    $dealerReceivableRows = array_values(array_filter($receivableRows, static fn(array $row): bool => strtolower((string)($row['source'] ?? '')) === 'dealer'));
+    $dealerArDetails = mec_dealer_ar_detail_rows($pdo, $dealerReceivableRows);
+    $dealerArSummary = [
+        'order_count' => count($dealerReceivableRows),
+        'line_count' => count($dealerArDetails),
+        'total_qty' => array_reduce($dealerArDetails, static fn(float $sum, array $row): float => $sum + (float)($row['quantity'] ?? 0), 0.0),
+        'total_cost' => array_reduce($dealerArDetails, static fn(float $sum, array $row): float => $sum + (float)($row['total_cost'] ?? 0), 0.0),
+        'outstanding' => array_reduce($dealerReceivableRows, static fn(float $sum, array $row): float => $sum + (float)($row['outstanding'] ?? 0), 0.0),
+    ];
 
     $purchaseItemAgg = api_table_exists($pdo, 'purchase_order_items')
         ? 'LEFT JOIN (
@@ -2228,6 +2375,8 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
         'receivable' => $receivableRows,
         'receivable_summary' => $receivableSummary,
         'receivable_collections' => mec_prior_ar_collections($pdo, $from, $to),
+        'ar_dealer_details' => $dealerArDetails,
+        'ar_dealer_summary' => $dealerArSummary,
         'purchase' => $purchaseRows,
         'purchase_closing' => $purchaseClosing,
         'payable' => $payableRows,
@@ -2289,6 +2438,12 @@ function mec_merge_actuals(array $rows, array $steps): array
             if (isset($actual['receivable_collections']) && is_array($actual['receivable_collections'])) {
                 $rows['receivable_collections'] = $actual['receivable_collections'];
             }
+        }
+        if ($key === 'ar_dealer' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED'
+            && isset($actual['ar_dealer_details'], $actual['ar_dealer_summary'])
+            && is_array($actual['ar_dealer_details']) && is_array($actual['ar_dealer_summary'])) {
+            $rows['ar_dealer_details'] = $actual['ar_dealer_details'];
+            $rows['ar_dealer_summary'] = $actual['ar_dealer_summary'];
         }
         if ($key === 'payable' && strtoupper((string)($step['status'] ?? '')) === 'LOCKED' && isset($actual['payable']) && is_array($actual['payable'])) {
             $rows['payable'] = $actual['payable'];
@@ -2394,6 +2549,7 @@ function mec_system_value(string $key, array $rows): float
         foreach (($rows['sales']['summary'] ?? []) as $row) if (($row[0] ?? '') === 'Total Sales') return (float)($row[1] ?? 0);
     }
     if ($key === 'receivable') return array_reduce($rows['receivable'] ?? [], static fn($sum, $row) => $sum + (float)($row['outstanding'] ?? 0), 0.0);
+    if ($key === 'ar_dealer') return (float)($rows['ar_dealer_summary']['outstanding'] ?? 0);
     if ($key === 'purchase') return array_reduce($rows['purchase'] ?? [], static fn($sum, $row) => $sum + (float)($row['amount'] ?? 0), 0.0);
     if ($key === 'payable') return array_reduce($rows['payable'] ?? [], static fn($sum, $row) => $sum + (float)($row['balance'] ?? 0), 0.0);
     if ($key === 'cash_bank') return array_reduce($rows['cashBank'] ?? [], static fn($sum, $row) => $sum + (float)($row['system'] ?? 0), 0.0);
@@ -2697,7 +2853,7 @@ try {
 
         if ($action === 'request_unlock') {
             $key = trim((string)($payload['step_key'] ?? ''));
-            $lockable = ['sales', 'receivable', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
+            $lockable = ['sales', 'receivable', 'ar_dealer', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
             if (!in_array($key, $lockable, true)) {
                 api_error('This step cannot be unlocked.', 422);
             }
@@ -2761,7 +2917,7 @@ try {
                 api_error('Month-End Closing close permission is required.', 403);
             }
             $key = trim((string)($payload['step_key'] ?? ''));
-            $lockable = ['sales', 'receivable', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
+            $lockable = ['sales', 'receivable', 'ar_dealer', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
             if (!in_array($key, $lockable, true)) {
                 api_error('This step cannot be unlocked.', 422);
             }

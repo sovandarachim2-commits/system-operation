@@ -243,6 +243,13 @@ function rbac_system_report_modules(): array
             ['resource' => 'sr_user_activity', 'label' => 'User Activity', 'actions' => ['view']],
             ['resource' => 'sr_pin_control', 'label' => 'PIN Code Control', 'actions' => ['view', 'update']],
         ],
+        'Backup Management' => [
+            ['resource' => 'sr_ordershadow_backup_status', 'label' => 'Backup Status', 'actions' => ['view', 'update']],
+            ['resource' => 'sr_ordershadow_backup_servers', 'label' => 'Backup Servers', 'actions' => ['view', 'create', 'update', 'delete']],
+            ['resource' => 'sr_ordershadow_backup_history', 'label' => 'Backup History', 'actions' => ['view']],
+            ['resource' => 'sr_ordershadow_backup_report', 'label' => 'Daily Report', 'actions' => ['view', 'update']],
+            ['resource' => 'sr_ordershadow_backup_telegram', 'label' => 'Telegram', 'actions' => ['view', 'update']],
+        ],
         'Settings' => [
             ['resource' => 'sr_notification_settings', 'label' => 'Notification Settings', 'actions' => ['view', 'update']],
             ['resource' => 'sr_app_logo_settings', 'label' => 'App Logo', 'actions' => ['view', 'update']],
