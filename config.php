@@ -141,12 +141,16 @@ $BASE_URL = '/OrderShadow';
 $DOMAIN = 'http://localhost' . $BASE_URL;
 
 // API CORS origins allowed to call JSON endpoints with session cookies.
+// Exact match only (scheme + host + port). Never use '*'.
 $API_ALLOWED_ORIGINS = [
-    'https://muru-report.vercel.app',
-    'http://192.168.110.16:5173',
-    'http://localhost',
-    'http://localhost:5173',
-    'http://localhost:3000',
     'https://shadow-report-puce.vercel.app',
-    'https://shadowsale.rentroomcambodia.com',
 ];
+// Local development frontends are only allowed when the backend itself
+// is being served from a local machine (XAMPP), never in production.
+$__serverHost = strtolower((string)parse_url('http://' . ($_SERVER['HTTP_HOST'] ?? ''), PHP_URL_HOST));
+if (in_array($__serverHost, ['localhost', '127.0.0.1'], true) || preg_match('/^192\.168\.\d+\.\d+$/', $__serverHost)) {
+    $API_ALLOWED_ORIGINS[] = 'http://localhost:5173';
+    $API_ALLOWED_ORIGINS[] = 'http://localhost:3000';
+    $API_ALLOWED_ORIGINS[] = 'http://192.168.110.16:5173';
+}
+unset($__serverHost);

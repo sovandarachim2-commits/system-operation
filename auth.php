@@ -40,44 +40,13 @@ function auth_start_session(): void
  * Cross-origin System Report (Vercel) support:
  * - Restore session from report token when PHP session cookie is missing.
  * - Emit CORS headers for allowed report frontends so admin AJAX can be read.
+ *   Implementation lives in includes/cors.php (exact-match allowlist).
  */
+require_once __DIR__ . '/includes/cors.php';
+
 function auth_apply_report_cors(): void
 {
-    $origin = (string)($_SERVER['HTTP_ORIGIN'] ?? '');
-    if ($origin === '') {
-        return;
-    }
-    $allowed = $GLOBALS['API_ALLOWED_ORIGINS'] ?? [];
-    if (!is_array($allowed)) {
-        $allowed = [];
-    }
-    $isAllowedOrigin = false;
-    $parsed = parse_url($origin);
-    $host = strtolower((string)($parsed['host'] ?? ''));
-    if (
-        $host === 'localhost'
-        || $host === '127.0.0.1'
-        || preg_match('/^192\.168\.\d+\.\d+$/', $host)
-        || preg_match('/^10\.\d+\.\d+\.\d+$/', $host)
-        || substr($host, -11) === '.vercel.app'
-        || substr($host, -21) === 'rentroomcambodia.com'
-        || in_array($origin, $allowed, true)
-    ) {
-        $isAllowedOrigin = true;
-    }
-    if (!$isAllowedOrigin) {
-        return;
-    }
-    header('Access-Control-Allow-Origin: ' . $origin);
-    header('Access-Control-Allow-Credentials: true');
-    header('Access-Control-Allow-Headers: Content-Type, X-Requested-With, Accept, Cache-Control, Authorization, X-Report-Token, X-Frontend-URL');
-    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
-    header('Access-Control-Max-Age: 86400');
-    header('Vary: Origin');
-    if (strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? '')) === 'OPTIONS') {
-        http_response_code(204);
-        exit;
-    }
+    cors_handle_request();
 }
 
 auth_apply_report_cors();
@@ -89,6 +58,15 @@ function auth_restore_user_from_report_token(): void
         return;
     }
     $auth = (string)($_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '');
+    if ($auth === '' && function_exists('apache_request_headers')) {
+        // mod_php does not expose Authorization in $_SERVER by default.
+        foreach ((array)apache_request_headers() as $name => $value) {
+            if (strcasecmp((string)$name, 'Authorization') === 0) {
+                $auth = (string)$value;
+                break;
+            }
+        }
+    }
     $token = '';
     if (preg_match('/^Bearer\s+(.+)$/i', $auth, $match)) {
         $token = trim($match[1]);
