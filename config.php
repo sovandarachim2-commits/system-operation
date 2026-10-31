@@ -144,6 +144,7 @@ $DOMAIN = 'http://localhost' . $BASE_URL;
 // Exact match only (scheme + host + port). Never use '*'.
 $API_ALLOWED_ORIGINS = [
     'https://shadow-report-puce.vercel.app',
+    'https://shadowreport.rentroomcambodia.com',
 ];
 // Local development frontends are only allowed when the backend itself
 // is being served from a local machine (XAMPP), never in production.

@@ -220,7 +220,11 @@ try {
                 $ip = user_activity_client_ip() ?? '127.0.0.1';
                 $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
                 $device = user_activity_device_label_from_parse(user_activity_device_parse($ua));
-                $frontendUrl = isset($_SERVER['HTTP_X_FRONTEND_URL']) ? trim((string)$_SERVER['HTTP_X_FRONTEND_URL']) : 'http://localhost/OrderShadow';
+                $frontendUrl = isset($_SERVER['HTTP_X_FRONTEND_URL'])
+                    ? trim((string)$_SERVER['HTTP_X_FRONTEND_URL'])
+                    : (isset($_SERVER['HTTP_REFERER'])
+                        ? trim((string)$_SERVER['HTTP_REFERER'])
+                        : (isset($_SERVER['HTTP_ORIGIN']) ? trim((string)$_SERVER['HTTP_ORIGIN']) : 'http://localhost/OrderShadow'));
 
                 $text = "{$statusIcon} *{$statusText}*\n";
                 $text .= "👤 User: `Test User`\n";

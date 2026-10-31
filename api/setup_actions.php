@@ -87,8 +87,12 @@ try {
         
         if (strpos($contentType, 'application/json') !== false) {
             $data = json_decode(file_get_contents('php://input'), true);
-        } else {
+        } elseif (!empty($_POST)) {
             $data = $_POST;
+        } else {
+            $raw = (string)file_get_contents('php://input');
+            $decoded = $raw !== '' ? json_decode($raw, true) : null;
+            $data = is_array($decoded) ? $decoded : $_POST;
         }
 
         if (!is_array($data)) {

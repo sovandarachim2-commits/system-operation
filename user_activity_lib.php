@@ -774,7 +774,11 @@ function user_activity_log(PDO $pdo, ?array $user, string $action, ?string $deta
         $deviceName = ($parsed['model_name'] ?? null) !== null ? substr((string)$parsed['model_name'], 0, 128) : null;
         $deviceModel = ($parsed['model_code'] ?? null) !== null ? substr((string)$parsed['model_code'], 0, 128) : null;
         $uri = isset($_SERVER['REQUEST_URI']) ? substr((string)$_SERVER['REQUEST_URI'], 0, 512) : null;
-        $frontendUrl = isset($_SERVER['HTTP_X_FRONTEND_URL']) ? substr((string)$_SERVER['HTTP_X_FRONTEND_URL'], 0, 512) : null;
+        $frontendUrl = isset($_SERVER['HTTP_X_FRONTEND_URL'])
+            ? substr((string)$_SERVER['HTTP_X_FRONTEND_URL'], 0, 512)
+            : (isset($_SERVER['HTTP_REFERER'])
+                ? substr((string)$_SERVER['HTTP_REFERER'], 0, 512)
+                : (isset($_SERVER['HTTP_ORIGIN']) ? substr((string)$_SERVER['HTTP_ORIGIN'], 0, 512) : null));
         
         // For login notifications, fallback to current URL if frontend_url is missing
         $logUrl = $frontendUrl;
