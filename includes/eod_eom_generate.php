@@ -1277,6 +1277,9 @@ function eod_eom_eom_sheet_lookups(PDO $pdo, string $monthStart, string $monthEn
     $dealer = [];
     $marketing = [];
     $returnPrev = [];
+    $returnPrevOnline = [];
+    $returnPrevOffline = [];
+    $returnPrevDealer = [];
     $adjustments = [];
     $skus = [];
     $names = [];
@@ -1578,8 +1581,79 @@ function eod_eom_eom_sheet_lookups(PDO $pdo, string $monthStart, string $monthEn
         $stmt->execute([$monthStart, $monthEnd, $prevStart, $prevEnd, $monthStart, $monthEnd, $prevStart, $prevEnd]);
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
             $name = (string)($row['item_name'] ?? '');
-            $remember($name, (string)($row['sku'] ?? ''));
-            eod_eom_sheet_bump($returnPrev, $name, (float)($row['qty'] ?? 0), (string)($row['sku'] ?? ''));
+            $sku = (string)($row['sku'] ?? '');
+            $qty = (float)($row['qty'] ?? 0);
+            $remember($name, $sku);
+            eod_eom_sheet_bump($returnPrev, $name, $qty, $sku);
+            eod_eom_sheet_bump($returnPrevOnline, $name, $qty, $sku);
+        }
+    } catch (Throwable $e) {
+        // ignore
+    }
+
+    try {
+        $stmt = $pdo->prepare("
+            SELECT
+                p.name AS item_name,
+                COALESCE(p.sku, '') AS sku,
+                SUM(CASE WHEN sm.movement_type IN ('in', 'purchase_in') THEN ABS(sm.quantity) ELSE -ABS(sm.quantity) END) AS qty
+            FROM stock_movements sm
+            JOIN products p ON p.id = sm.item_id
+            JOIN offline_sale_orders o ON o.order_code COLLATE utf8mb4_unicode_ci = sm.reference_id COLLATE utf8mb4_unicode_ci
+            WHERE DATE(sm.created_at) >= ?
+              AND DATE(sm.created_at) <= ?
+              AND sm.reference_type IN (
+                  'offline_sale', 'offline_sale_edit', 'offline_sale_cancel',
+                  'offline_customer_purchase', 'offline_purchase_edit', 'offline_customer_purchase_cancel'
+              )
+              AND o.sale_date >= '2000-01-01'
+              AND o.sale_date < ?
+            GROUP BY p.name, p.sku
+            HAVING ABS(qty) > 0.0005
+        ");
+        $stmt->execute([$monthStart, $monthEnd, $monthStart]);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $name = (string)($row['item_name'] ?? '');
+            $sku = (string)($row['sku'] ?? '');
+            $qty = (float)($row['qty'] ?? 0);
+            foreach (eod_eom_eom_expand_qty($name, $sku, $qty, $componentMap, $setKeys) as $line) {
+                $remember($line['item_name'], $line['sku']);
+                eod_eom_sheet_bump($returnPrev, $line['item_name'], $line['qty'], $line['sku']);
+                eod_eom_sheet_bump($returnPrevOffline, $line['item_name'], $line['qty'], $line['sku']);
+            }
+        }
+    } catch (Throwable $e) {
+        // ignore
+    }
+
+    try {
+        $stmt = $pdo->prepare("
+            SELECT
+                p.name AS item_name,
+                COALESCE(p.sku, '') AS sku,
+                SUM(CASE WHEN sm.movement_type IN ('in', 'purchase_in') THEN ABS(sm.quantity) ELSE -ABS(sm.quantity) END) AS qty
+            FROM stock_movements sm
+            JOIN products p ON p.id = sm.item_id
+            JOIN dealer_orders o ON o.order_code COLLATE utf8mb4_unicode_ci = SUBSTRING_INDEX(sm.reference_id, '-', 1) COLLATE utf8mb4_unicode_ci
+            WHERE DATE(sm.created_at) >= ?
+              AND DATE(sm.created_at) <= ?
+              AND sm.reference_type IN ('dealer_order', 'dealer_order_reverse')
+              AND o.order_date >= '2000-01-01'
+              AND o.order_date < ?
+            GROUP BY p.name, p.sku
+            HAVING ABS(qty) > 0.0005
+        ");
+        $stmt->execute([$monthStart, $monthEnd, $monthStart]);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $name = (string)($row['item_name'] ?? '');
+            $sku = (string)($row['sku'] ?? '');
+            $qty = (float)($row['qty'] ?? 0);
+            foreach (eod_eom_eom_expand_qty($name, $sku, $qty, $componentMap, $setKeys) as $line) {
+                $remember($line['item_name'], $line['sku']);
+                eod_eom_sheet_bump($returnPrev, $line['item_name'], $line['qty'], $line['sku']);
+                eod_eom_sheet_bump($returnPrevDealer, $line['item_name'], $line['qty'], $line['sku']);
+                eod_eom_sheet_bump($dealer, $line['item_name'], $line['qty'], $line['sku']);
+            }
         }
     } catch (Throwable $e) {
         // ignore
@@ -1622,6 +1696,9 @@ function eod_eom_eom_sheet_lookups(PDO $pdo, string $monthStart, string $monthEn
             'dealer_sales' => $qtyOf($dealer, $key),
             'marketing_stock_out' => $qtyOf($marketing, $key),
             'return_previous_month' => $qtyOf($returnPrev, $key),
+            'return_prev_online' => $qtyOf($returnPrevOnline, $key),
+            'return_prev_offline' => $qtyOf($returnPrevOffline, $key),
+            'return_prev_dealer' => $qtyOf($returnPrevDealer, $key),
             'adjustments' => $qtyOf($adjustments, $key),
         ];
     }

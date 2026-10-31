@@ -11,7 +11,11 @@ eod_eom_ensure_difference_review_columns($pdo);
 eod_eom_ensure_eom_sheet_columns($pdo);
 function inventory_closing_request_type(array $source, string $action = ''): string
 {
-    if ($action === 'generate_eom' || inventory_api_str($source['marketing_type_qty'] ?? '') === '1') {
+    if (
+        $action === 'generate_eom'
+        || inventory_api_str($source['marketing_type_qty'] ?? '') === '1'
+        || inventory_api_str($source['return_prev_qty'] ?? '') === '1'
+    ) {
         return 'eom';
     }
     if ($action === 'generate_eod') {
@@ -336,6 +340,45 @@ if (inventory_api_str($_GET['marketing_type_qty'] ?? '') === '1') {
         $typeMonth = date('Y-m');
     }
     api_json(['success' => true] + eod_eom_marketing_type_breakdown($pdo, $typeMonth));
+}
+
+if (inventory_api_str($_GET['return_prev_qty'] ?? '') === '1') {
+    $typeMonth = inventory_api_str($_GET['month'] ?? $month);
+    if (!preg_match('/^\d{4}-\d{2}$/', $typeMonth)) {
+        $typeMonth = date('Y-m');
+    }
+    api_json(['success' => true] + eod_eom_return_prev_breakdown($pdo, $typeMonth));
+}
+
+function eod_eom_return_prev_breakdown(PDO $pdo, string $month): array
+{
+    $monthStart = $month . '-01';
+    $monthEnd = date('Y-m-t', strtotime($monthStart));
+    $lookups = eod_eom_eom_sheet_lookups($pdo, $monthStart, $monthEnd);
+    $rows = [];
+    foreach ($lookups as $item) {
+        $online = (float)($item['return_prev_online'] ?? 0);
+        $offline = (float)($item['return_prev_offline'] ?? 0);
+        $dealer = (float)($item['return_prev_dealer'] ?? 0);
+        if (abs($online) < 0.0005 && abs($offline) < 0.0005 && abs($dealer) < 0.0005) {
+            continue;
+        }
+        $rows[] = [
+            'item_name' => (string)($item['item_name'] ?? ''),
+            'sku' => (string)($item['sku'] ?? ''),
+            'online' => $online,
+            'offline' => $offline,
+            'dealer' => $dealer,
+        ];
+    }
+    return [
+        'types' => [
+            ['key' => 'online', 'label' => 'Online'],
+            ['key' => 'offline', 'label' => 'Offline'],
+            ['key' => 'dealer', 'label' => 'Dealer'],
+        ],
+        'rows' => $rows,
+    ];
 }
 
 function eod_eom_marketing_type_breakdown(PDO $pdo, string $month): array
@@ -2356,28 +2399,31 @@ function inventory_closing_normalize_eom_sheet_rows(PDO $pdo, int $reportId, arr
         $month = '';
     }
     $lookups = [];
-    $needLookups = preg_match('/^\d{4}-\d{2}$/', $month)
-        && ($sheetSum < 0.0005 || $status !== 'finalized');
-    if ($needLookups) {
+    if (preg_match('/^\d{4}-\d{2}$/', $month)) {
         $lookups = eod_eom_eom_sheet_lookups($pdo, $month . '-01', date('Y-m-t', strtotime($month . '-01')));
     }
-    if ($lookups && $sheetSum < 0.0005) {
+    if ($lookups) {
         foreach ($out as $index => $row) {
             $key = mb_strtolower(trim((string)($row['item_name'] ?? '')));
             $hit = $lookups[$key] ?? null;
             if (!$hit) {
                 continue;
             }
-            $out[$index]['purchase_received'] = (float)($hit['purchase_received'] ?? 0);
-            $out[$index]['buy_back_by_team'] = eod_eom_decode_team_map($hit['buy_back_by_team'] ?? []);
-            $out[$index]['offline_sales_by_team'] = eod_eom_decode_team_map($hit['offline_sales_by_team'] ?? []);
-            $out[$index]['online_sales'] = (float)($hit['online_sales'] ?? 0);
-            $out[$index]['dealer_sales'] = (float)($hit['dealer_sales'] ?? 0);
-            $out[$index]['marketing_stock_out'] = (float)($hit['marketing_stock_out'] ?? 0);
-            $out[$index]['return_previous_month'] = (float)($hit['return_previous_month'] ?? 0);
-            $out[$index]['adjustments'] = (float)($hit['adjustments'] ?? 0);
-            if (inventory_api_num($out[$index]['opening_quantity'] ?? 0) < 0.0005) {
-                $out[$index]['opening_quantity'] = (float)($hit['opening'] ?? 0);
+            $out[$index]['return_prev_online'] = (float)($hit['return_prev_online'] ?? 0);
+            $out[$index]['return_prev_offline'] = (float)($hit['return_prev_offline'] ?? 0);
+            $out[$index]['return_prev_dealer'] = (float)($hit['return_prev_dealer'] ?? 0);
+            if ($sheetSum < 0.0005 || $status !== 'finalized') {
+                $out[$index]['purchase_received'] = (float)($hit['purchase_received'] ?? 0);
+                $out[$index]['buy_back_by_team'] = eod_eom_decode_team_map($hit['buy_back_by_team'] ?? []);
+                $out[$index]['offline_sales_by_team'] = eod_eom_decode_team_map($hit['offline_sales_by_team'] ?? []);
+                $out[$index]['online_sales'] = (float)($hit['online_sales'] ?? 0);
+                $out[$index]['dealer_sales'] = (float)($hit['dealer_sales'] ?? 0);
+                $out[$index]['marketing_stock_out'] = (float)($hit['marketing_stock_out'] ?? 0);
+                $out[$index]['return_previous_month'] = (float)($hit['return_previous_month'] ?? 0);
+                $out[$index]['adjustments'] = (float)($hit['adjustments'] ?? 0);
+                if (inventory_api_num($out[$index]['opening_quantity'] ?? 0) < 0.0005) {
+                    $out[$index]['opening_quantity'] = (float)($hit['opening'] ?? 0);
+                }
             }
         }
     }

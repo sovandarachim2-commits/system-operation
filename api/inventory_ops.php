@@ -386,7 +386,31 @@ function inventory_ops_is_external_stock_reference(string $referenceType, string
 
 function inventory_ops_reference_already_posted(PDO $pdo, string $movementType, string $referenceId): bool
 {
-    $types = inventory_ops_code_movement_types(inventory_ops_code_kind($movementType));
+    $referenceId = trim($referenceId);
+    if ($referenceId === '') {
+        return false;
+    }
+    $kind = inventory_ops_code_kind($movementType);
+    $types = inventory_ops_code_movement_types($kind);
+    if ($kind === 'IN' || $kind === 'OUT') {
+        try {
+            $stmt = $pdo->prepare("
+                SELECT movement_type
+                FROM stock_movements
+                WHERE reference_id = ?
+                  AND movement_type IN ('in', 'purchase_in', 'out', 'sale_out')
+                ORDER BY id DESC
+                LIMIT 1
+            ");
+            $stmt->execute([$referenceId]);
+            $latestType = $stmt->fetchColumn();
+            if ($latestType !== false && $latestType !== null) {
+                return in_array(strtolower((string)$latestType), $types, true);
+            }
+        } catch (Throwable $e) {
+            // Fall through to legacy check if query fails.
+        }
+    }
     return inventory_ops_code_exists($pdo, $referenceId, $types);
 }
 
