@@ -44,6 +44,14 @@ if ($method === 'POST') {
     $isMultipart = str_contains($contentType, 'multipart/form-data');
     if ($isMultipart) {
         $payload = $_POST;
+        $contentLength = (int)($_SERVER['CONTENT_LENGTH'] ?? 0);
+        if ($contentLength > 0 && $_POST === [] && $_FILES === []) {
+            // PHP discards the whole body when it exceeds post_max_size, so "action" is lost.
+            api_json([
+                'success' => false,
+                'message' => 'Upload is too large for the server (limit ' . ini_get('post_max_size') . '). Please attach smaller or fewer files and try again.',
+            ], 413);
+        }
     } else {
         $raw = (string)file_get_contents('php://input');
         $payload = json_decode($raw, true);
@@ -135,6 +143,19 @@ if ($method === 'POST') {
             foreach (inventory_location_options($pdo) as $loc) {
                 $locationMap[(int)$loc['value']] = (string)$loc['label'];
             }
+            $diffContext = inventory_closing_difference_message_context(
+                $pdo,
+                inventory_api_str($payload['report_type'] ?? 'eod'),
+                inventory_api_int($result['report_id'] ?? $payload['report_id'] ?? 0),
+                $locationMap
+            );
+            $diffCount = (int)($diffContext['difference_count'] ?? 0);
+            $reportTypeUpper = strtoupper(inventory_api_str($payload['report_type'] ?? 'eod'));
+            if ($diffCount > 0) {
+                $result['message'] = "{$reportTypeUpper} Closing finalized. {$diffCount} product/location difference(s) recorded.";
+            } else {
+                $result['message'] = "{$reportTypeUpper} Closing finalized. All physical counts match system stock.";
+            }
             $notification = inventory_closing_send_telegram(
                 $pdo,
                 inventory_api_str($payload['report_type'] ?? 'eod'),
@@ -189,6 +210,165 @@ if ($method === 'POST') {
             }
             $result = inventory_closing_send_telegram($pdo, $testReportType, $testReportId, 'Test Notification', $locationMap, true);
             api_json(['success' => !empty($result['ok']), 'notification' => $result, 'message' => $result['message'] ?? 'Test notification sent.']);
+        }
+
+        if ($action === 'update_report_meta') {
+            inventory_closing_require($reportTypeForPerm, 'update');
+            $metaType = strtolower(inventory_api_str($payload['report_type'] ?? 'eom'));
+            if (!in_array($metaType, ['eod', 'eom'], true)) {
+                $metaType = 'eom';
+            }
+            $metaId = inventory_api_int($payload['report_id'] ?? 0);
+            if ($metaId <= 0) {
+                throw new InvalidArgumentException('Report ID is required.');
+            }
+            $metaNotes = trim(inventory_api_str($payload['notes'] ?? ''));
+            if ($metaNotes === '') {
+                throw new InvalidArgumentException('Notes are required.');
+            }
+            $reportTable = $metaType === 'eod' ? 'eod_stock_reports' : 'eom_stock_reports';
+            $exists = $pdo->prepare("SELECT id FROM {$reportTable} WHERE id = ? LIMIT 1");
+            $exists->execute([$metaId]);
+            if (!$exists->fetchColumn()) {
+                throw new RuntimeException('Report not found.');
+            }
+            if (!function_exists('upload_store_uploaded_file')) {
+                require_once __DIR__ . '/../upload_paths.php';
+            }
+            $removeIds = [];
+            $rawRemove = $payload['remove_attachment_ids'] ?? '';
+            if (is_string($rawRemove) && $rawRemove !== '') {
+                $rawRemove = explode(',', $rawRemove);
+            }
+            if (is_array($rawRemove)) {
+                foreach ($rawRemove as $rid) {
+                    $rid = (int)$rid;
+                    if ($rid > 0) {
+                        $removeIds[] = $rid;
+                    }
+                }
+            }
+            $newFiles = isset($_FILES['attachments']) && is_array($_FILES['attachments'])
+                ? eod_eom_normalize_uploaded_files($_FILES['attachments'])
+                : [];
+            $allowedExt = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'jpg', 'jpeg', 'png', 'webp'];
+            $uploadedNew = [];
+            foreach ($newFiles as $file) {
+                $name = (string)($file['name'] ?? '');
+                $tmp = (string)($file['tmp_name'] ?? '');
+                $err = (int)($file['error'] ?? UPLOAD_ERR_NO_FILE);
+                $size = (int)($file['size'] ?? 0);
+                $mime = (string)($file['type'] ?? 'application/octet-stream');
+                if ($name === '' || $err !== UPLOAD_ERR_OK || $tmp === '' || !is_uploaded_file($tmp)) {
+                    continue;
+                }
+                $ext = strtolower((string)pathinfo($name, PATHINFO_EXTENSION));
+                if (!in_array($ext, $allowedExt, true)) {
+                    throw new InvalidArgumentException("Invalid file type for {$name}. Allowed: PDF, Word, Excel, Images.");
+                }
+                if ($size > 10 * 1024 * 1024) {
+                    throw new InvalidArgumentException("File {$name} is too large (max 10MB).");
+                }
+                $unique = uniqid('eod_eom_' . $metaType . '_', true) . '.' . $ext;
+                $stored = upload_store_uploaded_file(
+                    ['name' => $name, 'type' => $mime, 'tmp_name' => $tmp, 'error' => $err, 'size' => $size],
+                    'eod_eom_reports',
+                    $unique,
+                    null,
+                    $mime
+                );
+                $uploadedNew[] = [
+                    'original_name' => $name,
+                    'file_path' => preg_replace('#^uploads/eod_eom_reports/#', '', (string)$stored),
+                    'file_size' => $size,
+                    'mime_type' => $mime,
+                ];
+            }
+            $pdo->beginTransaction();
+            try {
+                $upd = $pdo->prepare("UPDATE {$reportTable} SET notes = ? WHERE id = ?");
+                $upd->execute([$metaNotes, $metaId]);
+                if ($removeIds) {
+                    $sel = $pdo->prepare('SELECT id, file_path FROM eod_eom_report_attachments WHERE id = ? AND report_id = ? AND report_type = ?');
+                    $del = $pdo->prepare('DELETE FROM eod_eom_report_attachments WHERE id = ? AND report_id = ? AND report_type = ?');
+                    foreach ($removeIds as $rid) {
+                        $sel->execute([$rid, $metaId, $metaType]);
+                        $att = $sel->fetch(PDO::FETCH_ASSOC);
+                        if (!$att) {
+                            continue;
+                        }
+                        $del->execute([$rid, $metaId, $metaType]);
+                        if (!empty($att['file_path'])) {
+                            upload_delete_local_file((string)$att['file_path'], 'eod_eom_reports');
+                        }
+                    }
+                }
+                if ($uploadedNew) {
+                    $ins = $pdo->prepare('
+                        INSERT INTO eod_eom_report_attachments
+                        (report_id, report_type, file_path, original_filename, file_size, mime_type, uploaded_by)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ');
+                    foreach ($uploadedNew as $info) {
+                        $ins->execute([$metaId, $metaType, $info['file_path'], $info['original_name'], $info['file_size'], $info['mime_type'], $userId]);
+                    }
+                }
+                $cnt = $pdo->prepare('SELECT COUNT(*) FROM eod_eom_report_attachments WHERE report_id = ? AND report_type = ?');
+                $cnt->execute([$metaId, $metaType]);
+                $remaining = (int)$cnt->fetchColumn();
+                if ($remaining <= 0) {
+                    throw new InvalidArgumentException('At least one attachment is required.');
+                }
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $e;
+            }
+            user_activity_log(
+                $pdo,
+                $currentUser,
+                'inventory_closing_update',
+                'updated note/attachments of ' . strtoupper($metaType) . ' report #' . $metaId,
+                ['module' => 'inventory_closing', 'action' => 'update_report_meta', 'report_id' => $metaId]
+            );
+            api_json([
+                'success' => true,
+                'message' => 'Note and attachments updated.',
+                'attachments' => inventory_closing_report_attachments($pdo, $metaType, $metaId),
+            ]);
+        }
+
+        if ($action === 'resend_telegram' || $action === 'resend_notification' || $action === 'resend_report') {
+            inventory_closing_require($reportTypeForPerm, 'update', 'view');
+            $resendType = strtolower(inventory_api_str($payload['report_type'] ?? 'eom'));
+            if (!in_array($resendType, ['eod', 'eom'], true)) {
+                $resendType = 'eom';
+            }
+            $resendId = inventory_api_int($payload['report_id'] ?? 0);
+            if ($resendId <= 0) {
+                throw new InvalidArgumentException('Report ID is required to resend notification.');
+            }
+            $locationMap = [];
+            foreach (inventory_location_options($pdo) as $loc) {
+                $locationMap[(int)$loc['value']] = (string)$loc['label'];
+            }
+            $result = inventory_closing_send_telegram($pdo, $resendType, $resendId, 'Finalized', $locationMap, true);
+            $typeUpper = strtoupper($resendType);
+            if (!empty($result['ok'])) {
+                api_json([
+                    'success' => true,
+                    'notification' => $result,
+                    'message' => "{$typeUpper} report resent to Telegram successfully.",
+                ]);
+            } else {
+                api_json([
+                    'success' => false,
+                    'notification' => $result,
+                    'message' => $result['message'] ?? "Failed to resend {$typeUpper} report to Telegram.",
+                ]);
+            }
         }
 
         if ($action === 'approve_differences') {
@@ -583,6 +763,8 @@ function inventory_closing_build_telegram_message(array $report, string $eventLa
         if ($remaining > 0) {
             $lines[] = '- +' . $remaining . ' ទៀត';
         }
+    } else {
+        $lines[] = '✅ ស្តុកទាំងអស់ត្រឹមត្រូវ (គ្មានភាពខុសគ្នា)';
     }
     $lines[] = "📝 ចំណាំ :";
     if (!empty($report['difference_reviewed_by'])) {
@@ -626,13 +808,60 @@ function inventory_closing_build_telegram_message(array $report, string $eventLa
     return implode("\n", $lines);
 }
 
-function inventory_closing_difference_message_context(PDO $pdo, string $reportType, int $reportId, array $locationMap, int $limit = 10): array
+function inventory_closing_difference_message_context(PDO $pdo, string $reportType, int $reportId, array $locationMap, int $limit = 20): array
 {
     $rows = inventory_closing_detail_rows($pdo, $reportType, $reportId, 0, 0, '', $locationMap);
     $lines = [];
     $count = 0;
 
     foreach ($rows as $row) {
+        $product = inventory_api_str($row['item_name'] ?? '') ?: 'Unknown product';
+
+        if ($reportType === 'eom') {
+            $finalLoc = is_array($row['final_location_qty'] ?? null) ? $row['final_location_qty'] : [];
+            $sysLoc = is_array($row['location_qty'] ?? null) ? $row['location_qty'] : [];
+            $hasLocData = false;
+
+            if (!empty($finalLoc)) {
+                $allLocIds = array_unique(array_merge(array_keys($finalLoc), array_keys($sysLoc)));
+                foreach ($allLocIds as $locId) {
+                    $cnt = $finalLoc[$locId] ?? null;
+                    if ($cnt === null || trim((string)$cnt) === '') {
+                        continue;
+                    }
+                    $hasLocData = true;
+                    $sys = round(inventory_api_num($sysLoc[$locId] ?? 0));
+                    $phys = round(inventory_api_num($cnt));
+                    $diff = $phys - $sys;
+                    if (abs($diff) < 0.005) {
+                        continue;
+                    }
+                    $count++;
+                    if (count($lines) < $limit) {
+                        $locName = $locationMap[(int)$locId] ?? ($locationMap[(string)$locId] ?? "Loc #$locId");
+                        $lines[] = $product . ' (' . $locName . ') - ' . inventory_closing_signed_qty_for_message($diff);
+                    }
+                }
+            }
+
+            if (!$hasLocData) {
+                if (!array_key_exists('final_quantity', $row) || $row['final_quantity'] === null) {
+                    continue;
+                }
+                $systemQty = inventory_api_num($row['current_stock'] ?? $row['final_closing_stock'] ?? $row['closing_quantity'] ?? 0);
+                $physicalQty = inventory_api_num($row['final_quantity']);
+                $difference = round($physicalQty) - round($systemQty);
+                if (abs($difference) < 0.005) {
+                    continue;
+                }
+                $count++;
+                if (count($lines) < $limit) {
+                    $lines[] = $product . ' - ' . inventory_closing_signed_qty_for_message($difference);
+                }
+            }
+            continue;
+        }
+
         if (!array_key_exists('final_quantity', $row) || $row['final_quantity'] === null) {
             continue;
         }
@@ -648,7 +877,6 @@ function inventory_closing_difference_message_context(PDO $pdo, string $reportTy
             continue;
         }
 
-        $product = inventory_api_str($row['item_name'] ?? '') ?: 'Unknown product';
         $location = inventory_api_str($row['location_name'] ?? '');
         $locationText = $location !== '' ? ' (' . $location . ')' : '';
         $lines[] = $product . $locationText . ' - ' . inventory_closing_signed_qty_for_message($difference);
@@ -673,8 +901,9 @@ function inventory_closing_telegram_caption(array $report, array $context = []):
     $differenceLines = is_array($context['difference_lines'] ?? null) ? $context['difference_lines'] : [];
     $differenceCount = (int)($context['difference_count'] ?? count($differenceLines));
 
+    $periodLabel = $type === 'EOM' ? '📅 ខែ' : '📅 ថ្ងៃទី';
     $caption = '📦 <b>របាយការណ៍ស្តុក ' . $type . '</b>' . "\n"
-        . '📅 ថ្ងៃទី : ' . $period . "\n"
+        . $periodLabel . ' : ' . $period . "\n"
         . '👤 បិទដោយ : ' . $finalizedBy . "\n"
         . '⏰ បិទនៅ : ' . inventory_closing_escape_html($finalizedAt);
     if (!empty($context['manager_review_confirmed'])) {
@@ -690,6 +919,8 @@ function inventory_closing_telegram_caption(array $report, array $context = []):
         if ($remaining > 0) {
             $caption .= "\n" . '- +' . $remaining . ' ទៀត';
         }
+    } else {
+        $caption .= "\n\n" . '✅ ស្តុកទាំងអស់ត្រឹមត្រូវ (គ្មានភាពខុសគ្នា)';
     }
 
     return $caption;
@@ -848,15 +1079,124 @@ function inventory_closing_build_excel_file(PDO $pdo, string $reportType, int $r
         'physical' => 0.0,
         'difference' => 0.0,
     ];
+    $rowNumber = 1;
     foreach ($rows as $index => $row) {
-        $systemQty = inventory_api_num($row['quantity_on_hand'] ?? $row['closing_quantity'] ?? 0);
-        $physical = array_key_exists('final_quantity', $row) && $row['final_quantity'] !== null ? inventory_api_num($row['final_quantity']) : '';
+        $activityValues = array_map(static fn(array $column) => $column['value']($row), $activityColumns);
+
+        if ($reportType === 'eom') {
+            $finalLoc = is_array($row['final_location_qty'] ?? null) ? $row['final_location_qty'] : [];
+            $sysLoc = is_array($row['location_qty'] ?? null) ? $row['location_qty'] : (is_array($row['system_location_qty'] ?? null) ? $row['system_location_qty'] : []);
+            $openLoc = is_array($row['opening_location_qty'] ?? null) ? $row['opening_location_qty'] : [];
+
+            $activeLocIds = [];
+            foreach ($finalLoc as $lid => $val) {
+                if ($val !== null && trim((string)$val) !== '') {
+                    $activeLocIds[(int)$lid] = true;
+                }
+            }
+            foreach ($sysLoc as $lid => $qty) {
+                if (abs(inventory_api_num($qty)) > 0.005) {
+                    $activeLocIds[(int)$lid] = true;
+                }
+            }
+            foreach ($openLoc as $lid => $qty) {
+                if (abs(inventory_api_num($qty)) > 0.005) {
+                    $activeLocIds[(int)$lid] = true;
+                }
+            }
+
+            if (empty($activeLocIds)) {
+                $totalSys = inventory_api_num($row['current_stock'] ?? $row['final_closing_stock'] ?? $row['closing_quantity'] ?? 0);
+                $hasOverallCount = array_key_exists('final_quantity', $row) && $row['final_quantity'] !== null && trim((string)$row['final_quantity']) !== '';
+                if ($hasOverallCount || abs($totalSys) > 0.005 || abs(inventory_api_num($row['opening_quantity'] ?? 0)) > 0.005) {
+                    $defId = (int)($row['storage_location_id'] ?? 1);
+                    $activeLocIds[$defId > 0 ? $defId : 1] = true;
+                }
+            }
+
+            if (!empty($activeLocIds)) {
+                $locIds = array_keys($activeLocIds);
+                usort($locIds, static function (int $a, int $b) use ($locationMap): int {
+                    if ($a === 1) return -1;
+                    if ($b === 1) return 1;
+                    $nameA = $locationMap[$a] ?? '';
+                    $nameB = $locationMap[$b] ?? '';
+                    return strcasecmp($nameA, $nameB);
+                });
+
+                foreach ($locIds as $locIndex => $locId) {
+                    $isFirstLoc = ($locIndex === 0);
+                    $locName = $locationMap[$locId] ?? ($locationMap[(string)$locId] ?? ('Location #' . $locId));
+
+                    $locSys = inventory_api_num($sysLoc[$locId] ?? ($sysLoc[(string)$locId] ?? 0));
+                    if (count($locIds) === 1 && empty($sysLoc)) {
+                        $locSys = inventory_api_num($row['current_stock'] ?? $row['final_closing_stock'] ?? $row['closing_quantity'] ?? 0);
+                    }
+
+                    $locVal = $finalLoc[$locId] ?? ($finalLoc[(string)$locId] ?? null);
+                    if ($locVal !== null && trim((string)$locVal) !== '') {
+                        $locPhys = inventory_api_num($locVal);
+                    } elseif (count($locIds) === 1 && array_key_exists('final_quantity', $row) && $row['final_quantity'] !== null && trim((string)$row['final_quantity']) !== '') {
+                        $locPhys = inventory_api_num($row['final_quantity']);
+                    } else {
+                        $locPhys = '';
+                    }
+
+                    $locDiff = $locPhys === '' ? '' : round($locPhys) - round($locSys);
+                    $locResult = 'Pending';
+                    if ($locDiff !== '') {
+                        $locResult = $locDiff < -0.005 ? 'Missing' : ($locDiff > 0.005 ? 'Extra' : 'Match');
+                    }
+
+                    $openVal = $openLoc[$locId] ?? ($openLoc[(string)$locId] ?? null);
+                    if ($openVal !== null) {
+                        $locOpen = inventory_api_num($openVal);
+                    } else {
+                        $locOpen = ($isFirstLoc && empty($openLoc)) ? inventory_api_num($row['opening_quantity'] ?? 0) : 0.0;
+                    }
+
+                    $locActivity = $isFirstLoc ? $activityValues : array_fill(0, count($activityColumns), 0.0);
+                    $locRemark = $isFirstLoc ? ($row['notes'] ?? '') : '';
+
+                    $totals['opening'] += $locOpen;
+                    foreach ($locActivity as $activityIndex => $activityValue) {
+                        $totals['activity'][$activityIndex] += inventory_api_num($activityValue);
+                    }
+                    $totals['system'] += $locSys;
+                    if ($locPhys !== '') {
+                        $totals['physical'] += inventory_api_num($locPhys);
+                        $totals['difference'] += inventory_api_num($locDiff);
+                    }
+
+                    $values = [
+                        $rowNumber++,
+                        $row['item_name'] ?? '',
+                        $row['brand_name'] ?? '',
+                        $row['product_type_label'] ?? $row['product_type'] ?? '',
+                        $locName,
+                        $locOpen,
+                        ...$locActivity,
+                        $locSys,
+                        $locPhys,
+                        $locDiff,
+                        $locResult,
+                        $locRemark,
+                    ];
+                    $tableRows[] = '<tr>' . implode('', array_map('inventory_closing_excel_cell', $values)) . '</tr>';
+                }
+                continue;
+            }
+        }
+
+        $systemQty = inventory_api_num($reportType === 'eom'
+            ? ($row['current_stock'] ?? $row['final_closing_stock'] ?? $row['closing_quantity'] ?? 0)
+            : ($row['quantity_on_hand'] ?? $row['closing_quantity'] ?? 0));
+        $physical = array_key_exists('final_quantity', $row) && $row['final_quantity'] !== null && trim((string)$row['final_quantity']) !== '' ? inventory_api_num($row['final_quantity']) : '';
         $difference = $physical === '' ? '' : round($physical) - round($systemQty);
         $result = 'Pending';
         if ($difference !== '') {
             $result = $difference < -0.005 ? 'Missing' : ($difference > 0.005 ? 'Extra' : 'Match');
         }
-        $activityValues = array_map(static fn(array $column) => $column['value']($row), $activityColumns);
         $totals['opening'] += inventory_api_num($row['opening_quantity'] ?? 0);
         foreach ($activityValues as $activityIndex => $activityValue) {
             $totals['activity'][$activityIndex] += inventory_api_num($activityValue);
@@ -866,12 +1206,16 @@ function inventory_closing_build_excel_file(PDO $pdo, string $reportType, int $r
             $totals['physical'] += inventory_api_num($physical);
             $totals['difference'] += inventory_api_num($difference);
         }
+        $locDisplay = inventory_api_str($row['location_name'] ?? '');
+        if ($locDisplay === '' || $locDisplay === 'Unassigned') {
+            $locDisplay = 'Office';
+        }
         $values = [
-            $index + 1,
+            $rowNumber++,
             $row['item_name'] ?? '',
             $row['brand_name'] ?? '',
             $row['product_type_label'] ?? $row['product_type'] ?? '',
-            $row['location_name'] ?? '',
+            $locDisplay,
             $row['opening_quantity'] ?? 0,
             ...$activityValues,
             $systemQty,
@@ -2611,6 +2955,24 @@ function inventory_closing_detail_rows(PDO $pdo, string $reportType, int $report
                 $locId = (int)($row['storage_location_id'] ?? 0);
                 $opening = inventory_api_num($row['opening_quantity'] ?? 0);
                 $closing = inventory_api_num($row['closing_quantity'] ?? 0);
+                $eomLocName = inventory_api_str($row['location_name'] ?? '');
+                if ($eomLocName === '') {
+                    if ($locId > 0) {
+                        $eomLocName = $locationMap[$locId] ?? ('Location #' . $locId);
+                    } else {
+                        $finalLoc = eod_eom_decode_team_map($row['final_location_qty_json'] ?? []);
+                        $sysLoc = eod_eom_decode_team_map($row['system_location_qty_json'] ?? []);
+                        $matchedNames = [];
+                        $checkLocs = !empty($finalLoc) ? $finalLoc : $sysLoc;
+                        foreach ($checkLocs as $lid => $lqty) {
+                            $lname = $locationMap[(int)$lid] ?? ($locationMap[(string)$lid] ?? '');
+                            if ($lname !== '' && !in_array($lname, $matchedNames, true)) {
+                                $matchedNames[] = $lname;
+                            }
+                        }
+                        $eomLocName = !empty($matchedNames) ? implode(', ', $matchedNames) : 'All Locations';
+                    }
+                }
                 $rows[] = [
                     'id' => (int)($row['id'] ?? 0),
                     'item_name' => inventory_api_str($row['item_name'] ?? ''),
@@ -2620,7 +2982,7 @@ function inventory_closing_detail_rows(PDO $pdo, string $reportType, int $report
                     'brand_id' => (int)($row['brand_id'] ?? 0),
                     'brand_name' => inventory_api_str($row['brand_name'] ?? ''),
                     'storage_location_id' => $locId,
-                    'location_name' => inventory_api_str($row['location_name'] ?? '') ?: ($locationMap[$locId] ?? ($locId ? ('Location #' . $locId) : 'Unassigned')),
+                    'location_name' => $eomLocName,
                     'location_code' => inventory_api_str($row['location_code'] ?? ''),
                     'location_is_default' => (int)($row['location_is_default'] ?? 0) === 1,
                     'opening_quantity' => $opening,

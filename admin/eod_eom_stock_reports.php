@@ -840,9 +840,10 @@ function eodEomGroupDetailsByLocationForExcel(array $details): array {
     foreach ($details as $detail) {
         $locationCode = trim((string)($detail['location_code'] ?? ''));
         $locationName = trim((string)($detail['location_name'] ?? ''));
-        $locationLabel = $locationCode !== '' ? $locationCode : 'Unknown';
-        if ($locationName !== '') {
-            $locationLabel .= ' - ' . $locationName;
+        if ($locationCode !== '') {
+            $locationLabel = $locationName !== '' ? "{$locationCode} - {$locationName}" : $locationCode;
+        } else {
+            $locationLabel = $locationName !== '' ? $locationName : 'All Locations';
         }
         if (!isset($groups[$locationLabel])) {
             $groups[$locationLabel] = [
@@ -1648,6 +1649,71 @@ function eodEomBuildStockReportExcel($pdo, $report_id, $report_type, string $col
             $details = eodEomAttachMarketingForEodDetails($pdo, $details, (string)($report['report_date'] ?? ''));
             $details = eodEomAttachPurchaseReturnForEodDetails($pdo, $details, (string)($report['report_date'] ?? ''));
             $details = eodEomAttachOfflineMovementsForEodDetails($pdo, $details, (string)($report['report_date'] ?? ''));
+        } elseif ($report_type === 'eom') {
+            $locStmt = $pdo->query("SELECT id, location_code, location_name, is_default FROM storage_locations");
+            $locMap = [];
+            foreach ($locStmt->fetchAll(PDO::FETCH_ASSOC) as $loc) {
+                $locMap[(int)$loc['id']] = $loc;
+            }
+            $expandedDetails = [];
+            foreach ($details as $item) {
+                $finalLoc = json_decode((string)($item['final_location_qty_json'] ?? '[]'), true) ?: [];
+                $sysLoc = json_decode((string)($item['system_location_qty_json'] ?? '[]'), true) ?: [];
+                $activeLocIds = [];
+                foreach ($finalLoc as $lid => $val) {
+                    if ($val !== null && trim((string)$val) !== '') {
+                        $activeLocIds[(int)$lid] = true;
+                    }
+                }
+                foreach ($sysLoc as $lid => $qty) {
+                    if (abs((float)$qty) > 0.005) {
+                        $activeLocIds[(int)$lid] = true;
+                    }
+                }
+                if (empty($activeLocIds)) {
+                    $defId = (int)($item['storage_location_id'] ?? 1);
+                    $activeLocIds[$defId > 0 ? $defId : 1] = true;
+                }
+                $locIds = array_keys($activeLocIds);
+                usort($locIds, static function (int $a, int $b) use ($locMap): int {
+                    if ($a === 1) return -1;
+                    if ($b === 1) return 1;
+                    $nameA = $locMap[$a]['location_name'] ?? '';
+                    $nameB = $locMap[$b]['location_name'] ?? '';
+                    return strcasecmp($nameA, $nameB);
+                });
+
+                foreach ($locIds as $locIndex => $lid) {
+                    $locInfo = $locMap[$lid] ?? null;
+                    $locItem = $item;
+                    $locItem['storage_location_id'] = $lid;
+                    $locItem['location_name'] = $locInfo['location_name'] ?? ('Location #' . $lid);
+                    $locItem['location_code'] = $locInfo['location_code'] ?? '';
+                    $locItem['location_is_default'] = (int)($locInfo['is_default'] ?? 0);
+
+                    $locSys = (float)($sysLoc[$lid] ?? ($sysLoc[(string)$lid] ?? 0));
+                    if (count($locIds) === 1 && empty($sysLoc)) {
+                        $locSys = (float)($item['closing_quantity'] ?? 0);
+                    }
+                    $locItem['closing_quantity'] = $locSys;
+                    $locItem['quantity_on_hand'] = $locSys;
+
+                    $locVal = $finalLoc[$lid] ?? ($finalLoc[(string)$lid] ?? null);
+                    if ($locVal !== null && trim((string)$locVal) !== '') {
+                        $locItem['final_quantity'] = (float)$locVal;
+                    }
+
+                    if ($locIndex > 0) {
+                        $locItem['opening_quantity'] = 0;
+                        $locItem['movements_in'] = 0;
+                        $locItem['movements_out'] = 0;
+                        $locItem['average_quantity'] = 0;
+                        $locItem['closing_value'] = 0;
+                    }
+                    $expandedDetails[] = $locItem;
+                }
+            }
+            $details = $expandedDetails;
         }
         $details = eodEomFilterDetailsRowsForPrintLike($details, $report_type);
         $label = strtoupper($report_type);
@@ -1752,7 +1818,7 @@ function eodEomBuildStockReportExcel($pdo, $report_id, $report_type, string $col
                     $transferOut = $item['transfer_out'] ?? 0;
                     $adjustment = $item['adjustments'] ?? 0;
                     $closingStock = $item['quantity_on_hand'] ?? 0;
-                    $locationDisplay = $item['location_code'] ?? $item['location_name'] ?? 'Unknown';
+                    $locationDisplay = (!empty($item['location_code']) ? $item['location_code'] : (!empty($item['location_name']) ? $item['location_name'] : 'All Locations'));
 
                     $rows[] = [
                         $rowNumber++,
