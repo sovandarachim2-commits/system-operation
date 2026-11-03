@@ -11,6 +11,12 @@ $DB_PASS = '';
 // Timezone
 date_default_timezone_set('Asia/Bangkok');
 
+// Error handling: log errors instead of displaying them in HTTP responses
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+ini_set('log_errors', '1');
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
+
 // Telegram settings (fill with your bot credentials)
 $TELEGRAM_BOT_TOKEN = '8321782817:AAHCd0WzYaOGVmXd8qWAuuBLtemAJa73eHk';
 // Legacy single chat id (still used if TELEGRAM_TARGETS is empty)

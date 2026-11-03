@@ -906,7 +906,7 @@ function user_activity_send_login_notification(PDO $pdo, ?array $user, string $a
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
             curl_exec($ch);
-            curl_close($ch);
+            unset($ch);
         }
     } catch (Throwable $e) {
         error_log('user_activity_send_login_notification: ' . $e->getMessage());

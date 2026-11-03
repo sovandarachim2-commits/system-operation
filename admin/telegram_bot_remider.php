@@ -111,7 +111,7 @@ function sendTelegramReminderTest(string $message, ?string $chatId, ?string $thr
 
     $response = curl_exec($ch);
     $error = curl_error($ch);
-    curl_close($ch);
+    unset($ch);
 
     if ($response === false) {
         return ['ok' => false, 'message' => 'Telegram request failed: ' . $error];

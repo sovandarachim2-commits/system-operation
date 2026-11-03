@@ -966,7 +966,7 @@ function inventory_closing_send_telegram_media(
     $raw = curl_exec($ch);
     $curlError = curl_error($ch);
     $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
+    unset($ch);
 
     if ($raw === false) {
         return ['ok' => false, 'error' => $curlError !== '' ? $curlError : 'Telegram media send failed.', 'http_code' => $httpCode];

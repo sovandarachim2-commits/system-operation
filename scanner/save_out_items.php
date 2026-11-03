@@ -179,7 +179,7 @@ function scanner_out_items_send_telegram_photo(mysqli $conn, string $inv, string
         curl_setopt($ch, CURLOPT_NOSIGNAL, 1);
         $response = curl_exec($ch);
         $curlError = curl_error($ch);
-        curl_close($ch);
+        unset($ch);
 
         if ($response === false) {
             return ['ok' => false, 'message' => $curlError !== '' ? $curlError : 'Failed to call Telegram API.'];

@@ -166,7 +166,7 @@ do {
         $key = (int)$ch;
         if (!isset($activeUploads[$key])) {
             curl_multi_remove_handle($multi, $ch);
-            curl_close($ch);
+            unset($ch);
             continue;
         }
 
@@ -185,7 +185,7 @@ do {
 
         fclose($meta['stream']);
         curl_multi_remove_handle($multi, $ch);
-        curl_close($ch);
+        unset($ch);
         unset($activeUploads[$key]);
 
         $completed++;

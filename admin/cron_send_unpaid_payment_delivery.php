@@ -54,7 +54,7 @@ function cron_send_document(string $botToken, string $chatId, ?int $threadId, st
 
     $response = curl_exec($ch);
     $curlError = curl_error($ch);
-    curl_close($ch);
+    unset($ch);
 
     if ($response === false) {
         return ['ok' => false, 'error' => $curlError !== '' ? $curlError : 'Failed to send document'];

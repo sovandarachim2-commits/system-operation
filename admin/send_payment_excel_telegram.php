@@ -38,7 +38,7 @@ function send_telegram_message(string $botToken, string $chatId, ?int $threadId,
 
     $response = curl_exec($ch);
     $error = curl_error($ch);
-    curl_close($ch);
+    unset($ch);
 
     if ($response === false) {
         return ['ok' => false, 'error' => $error !== '' ? $error : 'Request failed'];
@@ -140,7 +140,7 @@ function send_telegram_document(string $botToken, string $chatId, ?int $threadId
 
     $response = curl_exec($ch);
     $error = curl_error($ch);
-    curl_close($ch);
+    unset($ch);
 
     if ($response === false) {
         return ['ok' => false, 'error' => $error !== '' ? $error : 'Document request failed'];

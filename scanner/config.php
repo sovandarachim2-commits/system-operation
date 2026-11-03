@@ -7,6 +7,12 @@
 // Load main config (DB settings, timezone, etc.)
 require_once __DIR__ . '/../config.php';
 
+// Ensure scanner APIs always output clean JSON without PHP warning/notice contamination
+ini_set('display_errors', '0');
+ini_set('display_startup_errors', '0');
+ini_set('log_errors', '1');
+error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
+
 // Map main config.php variables into constants for scanner usage
 define('DB_HOST', $DB_HOST);
 define('DB_USER', $DB_USER);

@@ -296,7 +296,7 @@ function telegram_http_post_form(string $url, array $data): ?string
             ]);
             $response = curl_exec($ch);
             $curlError = curl_error($ch);
-            curl_close($ch);
+            unset($ch);
             if ($response !== false) {
                 return $response;
             }

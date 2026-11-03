@@ -589,7 +589,7 @@ function osb_telegram_request(string $method, array $fields, ?string $filePath =
     ]);
     $raw = curl_exec($ch);
     $errno = curl_errno($ch);
-    curl_close($ch);
+    unset($ch);
     if ($errno !== 0 || !is_string($raw)) {
         throw new RuntimeException('Telegram did not respond.');
     }

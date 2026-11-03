@@ -100,7 +100,7 @@ function sprlSendDocumentToTelegram(string $filePath, string $fileName, string $
 
         $response = curl_exec($ch);
         $curlError = curl_error($ch);
-        curl_close($ch);
+        unset($ch);
 
         $targetLabel = 'chat_id=' . $chatId . ($threadId !== null ? ', thread_id=' . $threadId : '');
         if ($response !== false) {

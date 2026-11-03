@@ -164,7 +164,7 @@ function upload_storage_r2_put_object(string $sourcePath, string $objectKey, str
     $response = curl_exec($ch);
     $curlError = curl_error($ch);
     $statusCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
+    unset($ch);
     fclose($stream);
 
     if ($response === false) {

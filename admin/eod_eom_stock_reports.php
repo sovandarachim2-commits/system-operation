@@ -2207,7 +2207,7 @@ function sendPhotoToTelegram($filePath, $fileName, $caption = '', $reportType = 
         $response = curl_exec($ch);
         $curlError = curl_error($ch);
         $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        unset($ch);
 
         if ($response !== false) {
             $decoded = json_decode($response, true);
@@ -2298,7 +2298,7 @@ function sendDocumentToTelegram($filePath, $fileName, $caption = '', $reportType
         $response = curl_exec($ch);
         $curlError = curl_error($ch);
         $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        unset($ch);
 
         if ($response !== false) {
             $decoded = json_decode($response, true);

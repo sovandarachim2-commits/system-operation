@@ -528,7 +528,7 @@ function soldProductsSendDocumentToTelegram($filePath, $fileName, $caption = '')
         $response = curl_exec($ch);
         $curlError = curl_error($ch);
         $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        unset($ch);
 
         if ($response !== false) {
             $decoded = json_decode($response, true);
