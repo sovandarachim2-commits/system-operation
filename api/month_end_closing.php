@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/bootstrap.php';
+require_once __DIR__ . '/month_end_income.php';
 $mecAccessPayload = json_decode(file_get_contents('php://input') ?: '{}', true);
 $mecAccessAction = is_array($mecAccessPayload) ? (string)($mecAccessPayload['action'] ?? '') : '';
 $GLOBALS['MEC_ACCESS_PAYLOAD'] = is_array($mecAccessPayload) ? $mecAccessPayload : [];
@@ -26,6 +27,7 @@ const MEC_STEPS = [
     'adjustments' => 'Stock Adjustments',
     'missing_stock' => 'Missing Stock',
     'expenses' => 'Expense Closing',
+    'income' => 'Income',
     'final_review' => 'Final Review',
 ];
 
@@ -2395,6 +2397,7 @@ function mec_calculated_data(PDO $pdo, string $month, bool $includePreviousAr = 
         'expenses' => $expenses,
         'expense_groups' => $expenseGroups,
         'expense_summary' => $expenseSummary,
+        'income' => mec_income_data($pdo, $month),
     ];
 }
 
@@ -2404,6 +2407,10 @@ function mec_merge_actuals(array $rows, array $steps): array
         $key = (string)$step['step_key'];
         $actual = json_decode((string)($step['actual_json'] ?? ''), true);
         if (!is_array($actual)) continue;
+        if ($key === 'income' && in_array(strtoupper((string)($step['status'] ?? '')), ['REVIEWED', 'LOCKED'], true) && isset($actual['income']) && is_array($actual['income'])) {
+            $rows['income'] = $actual['income'];
+            $rows['income']['snapshot_status'] = 'saved';
+        }
         if ($key === 'cash_bank' && isset($actual['cashBank']) && is_array($actual['cashBank'])) {
             $savedByAccount = [];
             foreach ($actual['cashBank'] as $savedRow) {
@@ -2481,6 +2488,7 @@ function mec_merge_actuals(array $rows, array $steps): array
 function mec_step_records(PDO $pdo, int $closingId, array $rows): array
 {
     $existingRows = mec_fetch_rows($pdo, 'SELECT * FROM month_end_closing_steps WHERE closing_id = ?', [$closingId]);
+    $closingStatus = (string)mec_scalar($pdo, 'SELECT status FROM month_end_closings WHERE id = ?', [$closingId]);
     $existing = [];
     foreach ($existingRows as $row) $existing[(string)$row['step_key']] = $row;
 
@@ -2490,7 +2498,14 @@ function mec_step_records(PDO $pdo, int $closingId, array $rows): array
         $issueCount = mec_issue_count($key, $rows);
         $row = $existing[$key] ?? [];
         $status = (string)($row['status'] ?? 'PENDING');
-        if ($key === 'final_review' && empty($row)) $status = 'LOCKED';
+        if ($key === 'income' && !$row && $closingStatus === 'CLOSED') $status = 'LOCKED';
+        if ($key === 'final_review') {
+            if ($closingStatus === 'CLOSED') {
+                $status = 'LOCKED';
+            } elseif (empty($row) || $status === 'LOCKED') {
+                $status = 'PENDING';
+            }
+        }
         if ($key === 'cash_bank' && empty($row) && $issueCount > 0) $status = 'NEEDS_REVIEW';
         if ($key === 'missing_stock' && empty($row) && $issueCount > 0) $status = 'NEEDS_REVIEW';
         $result[] = [
@@ -2545,6 +2560,7 @@ function mec_expected_inventory(array $row): float
 
 function mec_system_value(string $key, array $rows): float
 {
+    if ($key === 'income') return (float)($rows['income']['summary']['profit'] ?? 0);
     if ($key === 'sales') {
         foreach (($rows['sales']['summary'] ?? []) as $row) if (($row[0] ?? '') === 'Total Sales') return (float)($row[1] ?? 0);
     }
@@ -2659,6 +2675,7 @@ function mec_report_payload(PDO $pdo, string $month, array $closing, array $rows
 
     return [
         'title' => 'Month-End Closing Report',
+        'income' => $rows['income'] ?? null,
         'period' => date('F Y', strtotime($month . '-01')),
         'month' => $month,
         'period_from' => mec_month_start($month),
@@ -2785,6 +2802,7 @@ function mec_required_note(array $payload): string
 function mec_save_step(PDO $pdo, int $closingId, string $key, string $status, string $note, array $actuals, array $rows): void
 {
     if (!isset(MEC_STEPS[$key])) api_error('Invalid closing step.', 422);
+    if ($key === 'income') $actuals = ['income' => $rows['income'] ?? []];
     $allowed = ['PENDING', 'IN_PROGRESS', 'NEEDS_REVIEW', 'REVIEWED', 'LOCKED'];
     if (!in_array($status, $allowed, true)) $status = 'IN_PROGRESS';
     $userId = mec_current_user_id();
@@ -2853,7 +2871,7 @@ try {
 
         if ($action === 'request_unlock') {
             $key = trim((string)($payload['step_key'] ?? ''));
-            $lockable = ['sales', 'receivable', 'ar_dealer', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
+            $lockable = ['sales', 'receivable', 'ar_dealer', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock', 'income'];
             if (!in_array($key, $lockable, true)) {
                 api_error('This step cannot be unlocked.', 422);
             }
@@ -2917,7 +2935,7 @@ try {
                 api_error('Month-End Closing close permission is required.', 403);
             }
             $key = trim((string)($payload['step_key'] ?? ''));
-            $lockable = ['sales', 'receivable', 'ar_dealer', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock'];
+            $lockable = ['sales', 'receivable', 'ar_dealer', 'payable', 'purchase', 'cash_bank', 'marketing_stock', 'expenses', 'adjustments', 'missing_stock', 'income'];
             if (!in_array($key, $lockable, true)) {
                 api_error('This step cannot be unlocked.', 422);
             }
@@ -2962,6 +2980,15 @@ try {
                 'receivable' => $rows['receivable'] ?? [],
                 'receivable_summary' => $rows['receivable_summary'] ?? [],
                 'receivable_collections' => $rows['receivable_collections'] ?? [],
+                'include_previous_ar' => !empty($_GET['include_previous_ar']),
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
+        if ($action === 'close_ar_dealer') {
+            mec_save_step($pdo, $closingId, 'ar_dealer', 'LOCKED', mec_required_note($payload), [
+                'ar_dealer_details' => $rows['ar_dealer_details'] ?? [],
+                'ar_dealer_summary' => $rows['ar_dealer_summary'] ?? [],
                 'include_previous_ar' => !empty($_GET['include_previous_ar']),
             ], $rows);
             mec_response($pdo, $month);
@@ -3090,12 +3117,36 @@ try {
             mec_response($pdo, $month);
         }
 
+        if ($action === 'close_income') {
+            require_role_or_permission(['admin'], 'sr_month_end_closing.update');
+            $incomeSaved = null;
+            foreach ($savedSteps as $savedStep) {
+                if ((string)($savedStep['step_key'] ?? '') === 'income') $incomeSaved = $savedStep;
+            }
+            if (strtoupper((string)($incomeSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('Income is locked. Changes require manager unlock.', 409);
+            }
+            mec_save_step($pdo, $closingId, 'income', 'LOCKED', mec_required_note($payload), [
+                'income' => $rows['income'] ?? [],
+            ], $rows);
+            mec_response($pdo, $month);
+        }
+
         if ($action === 'save_step' || $action === 'mark_review' || $action === 'mark_reviewed') {
             $key = trim((string)($payload['step_key'] ?? ''));
             $note = trim((string)($payload['note'] ?? ''));
             $actuals = is_array($payload['actuals'] ?? null) ? $payload['actuals'] : [];
+            if ($key === 'income') {
+                require_role_or_permission(['admin'], 'sr_month_end_closing.update');
+                foreach ($savedSteps as $savedStep) {
+                    if (($savedStep['step_key'] ?? '') === 'income' && strtoupper((string)($savedStep['status'] ?? '')) === 'LOCKED') {
+                        api_error('Income is locked. Changes require manager unlock.', 409);
+                    }
+                }
+            }
             $salesSaved = null;
             $receivableSaved = null;
+            $arDealerSaved = null;
             $payableSaved = null;
             $cashSaved = null;
             $purchaseSaved = null;
@@ -3105,6 +3156,7 @@ try {
             foreach ($savedSteps as $savedStep) {
                 if ((string)($savedStep['step_key'] ?? '') === 'sales') $salesSaved = $savedStep;
                 if ((string)($savedStep['step_key'] ?? '') === 'receivable') $receivableSaved = $savedStep;
+                if ((string)($savedStep['step_key'] ?? '') === 'ar_dealer') $arDealerSaved = $savedStep;
                 if ((string)($savedStep['step_key'] ?? '') === 'payable') $payableSaved = $savedStep;
                 if ((string)($savedStep['step_key'] ?? '') === 'cash_bank') $cashSaved = $savedStep;
                 if ((string)($savedStep['step_key'] ?? '') === 'purchase') $purchaseSaved = $savedStep;
@@ -3117,6 +3169,9 @@ try {
             }
             if ($key === 'receivable' && strtoupper((string)($receivableSaved['status'] ?? '')) === 'LOCKED') {
                 api_error('Accounts Receivable is locked. Changes require manager unlock.', 409);
+            }
+            if ($key === 'ar_dealer' && strtoupper((string)($arDealerSaved['status'] ?? '')) === 'LOCKED') {
+                api_error('AR Dealer is locked. Changes require manager unlock.', 409);
             }
             if ($key === 'payable' && strtoupper((string)($payableSaved['status'] ?? '')) === 'LOCKED') {
                 api_error('Accounts Payable is locked. Changes require manager unlock.', 409);
@@ -3198,6 +3253,7 @@ try {
             }
             $stmt = $pdo->prepare("UPDATE month_end_closings SET status = 'REOPENED', closing_version = closing_version + 1, final_approval_status = 'Pending', reports_generated_at = NULL, reopened_by = ?, reopened_at = NOW(), reopen_reason = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
             $stmt->execute([$userId, $reason, $userId, $closingId]);
+            $pdo->prepare("UPDATE month_end_closing_steps SET status = 'PENDING', updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE closing_id = ? AND step_key = 'final_review'")->execute([$userId, $closingId]);
             mec_log($pdo, $closingId, null, 'reopen_month', $reason, ['steps_remain_locked' => true]);
             mec_response($pdo, $month);
         }

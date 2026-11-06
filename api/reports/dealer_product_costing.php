@@ -121,7 +121,7 @@ function dpc_load(PDO $pdo): void
     pc_history_ensure_schema($pdo);
 
     [$from, $to, $month] = dpc_request_range();
-    pc_lock_respond_if_locked($pdo, 'dealer', $month);
+    pc_lock_respond_if_locked($pdo, 'dealer', $month, false, $from, $to);
     $q = trim((string)($_GET['q'] ?? ''));
     $brandIds = dpc_brand_ids($_GET['brand_ids'] ?? $_GET['brand_id'] ?? '');
     $dealerIds = pc_brand_ids($_GET['dealer_ids'] ?? '');

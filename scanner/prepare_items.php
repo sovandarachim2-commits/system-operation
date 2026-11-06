@@ -995,9 +995,20 @@ require_role_or_permission(['admin', 'cashier', 'scanner'], 'scanner_home.view')
       try {
         data = text ? JSON.parse(text) : null;
       } catch (error) {
-        if (text) { const m = text.match(/\{[\s\S]*\}/); if (m) { try { data = JSON.parse(m[0]); } catch(e){} } } if (!data) { const message = text ? text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-          : 'Invalid API response';
-        throw new Error(message);
+        if (text) {
+          const m = text.match(/\{[\s\S]*\}/);
+          if (m) {
+            try {
+              data = JSON.parse(m[0]);
+            } catch (e) {}
+          }
+        }
+        if (!data) {
+          const message = text
+            ? text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+            : 'Invalid API response';
+          throw new Error(message);
+        }
       }
       if (!response.ok) {
         throw new Error((data && (data.message || data.error)) || 'API request failed');

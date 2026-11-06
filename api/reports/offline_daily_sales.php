@@ -115,15 +115,37 @@ try {
                 SELECT 1
                 FROM offline_sale_order_items oi_filter
                 INNER JOIN products p_filter ON p_filter.id = oi_filter.product_id
-                WHERE oi_filter.order_id = o.id AND p_filter.brand_id = ?
+                WHERE oi_filter.order_id = o.id AND (
+                    p_filter.brand_id = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM product_sets ps_b
+                        JOIN product_set_items psi_b ON psi_b.product_set_id = ps_b.id
+                        JOIN products cp_b ON cp_b.id = psi_b.product_id
+                        WHERE ps_b.set_name = p_filter.name
+                          AND cp_b.brand_id = ?
+                    )
+                )
             )
             OR EXISTS (
                 SELECT 1
                 FROM offline_sale_purchase_items pi_filter
                 INNER JOIN products pp_filter ON pp_filter.id = pi_filter.product_id
-                WHERE pi_filter.order_id = o.id AND pp_filter.brand_id = ?
+                WHERE pi_filter.order_id = o.id AND (
+                    pp_filter.brand_id = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM product_sets ps_b
+                        JOIN product_set_items psi_b ON psi_b.product_set_id = ps_b.id
+                        JOIN products cp_b ON cp_b.id = psi_b.product_id
+                        WHERE ps_b.set_name = pp_filter.name
+                          AND cp_b.brand_id = ?
+                    )
+                )
             )
         )";
+        $params[] = $brandId;
+        $params[] = $brandId;
         $params[] = $brandId;
         $params[] = $brandId;
     }
@@ -137,7 +159,18 @@ try {
     $itemParams = $params;
     $paidExpr = report_offline_paid_expr();
     if ($brandId !== null) {
-        $itemWhereSql .= ' AND p.brand_id = ?';
+        $itemWhereSql .= " AND (
+            p.brand_id = ?
+            OR EXISTS (
+                SELECT 1
+                FROM product_sets ps_b
+                JOIN product_set_items psi_b ON psi_b.product_set_id = ps_b.id
+                JOIN products cp_b ON cp_b.id = psi_b.product_id
+                WHERE ps_b.set_name = p.name
+                  AND cp_b.brand_id = ?
+            )
+        )";
+        $itemParams[] = $brandId;
         $itemParams[] = $brandId;
     }
 

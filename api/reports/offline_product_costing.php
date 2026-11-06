@@ -114,7 +114,7 @@ function opc_load(PDO $pdo): void
         require_role_or_permission(['admin'], 'sr_offline_product_costing.view', 'sr_product_costing.view', 'product_costs.view');
     }
     pc_previous_cost_respond($pdo, 'offline');
-    pc_lock_respond_if_locked($pdo, 'offline', $month, $summaryOnly);
+    pc_lock_respond_if_locked($pdo, 'offline', $month, $summaryOnly, $from, $to);
     offline_ensure_schema($pdo);
     if (!$summaryOnly) {
         pc_history_ensure_schema($pdo);

@@ -649,7 +649,17 @@ try {
           " . ($to !== null ? "AND pj.printed_at < DATE_ADD(?, INTERVAL 1 DAY)" : "") . "
           " . ($q !== '' ? "AND (o.order_code LIKE ? OR o.customer_name LIKE ? OR p.name LIKE ?)" : "") . "
           " . (($productId !== false && $productId !== null) ? "AND oi.product_id = ?" : "") . "
-          " . (($brandId !== false && $brandId !== null) ? "AND p.brand_id = ?" : "") . "
+          " . (($brandId !== false && $brandId !== null) ? "AND (
+              p.brand_id = ?
+              OR EXISTS (
+                  SELECT 1
+                  FROM product_sets ps_b
+                  JOIN product_set_items psi_b ON psi_b.product_set_id = ps_b.id
+                  JOIN products cp_b ON cp_b.id = psi_b.product_id
+                  WHERE ps_b.set_name = p.name
+                    AND cp_b.brand_id = ?
+              )
+          )" : "") . "
           " . (($sellerId !== false && $sellerId !== null) ? "AND o.seller_id = ?" : "") . "
           " . (($categoryId !== false && $categoryId !== null) ? "AND p.category_id = ?" : "") . "
           " . ($paymentFilter !== '' ? "AND {$paymentFilter}" : "") . "
@@ -671,6 +681,7 @@ try {
         $orderParams[] = (int)$productId;
     }
     if ($brandId !== false && $brandId !== null) {
+        $orderParams[] = (int)$brandId;
         $orderParams[] = (int)$brandId;
     }
     if ($sellerId !== false && $sellerId !== null) {
@@ -695,11 +706,22 @@ try {
             FROM order_items oi
             JOIN products p ON p.id = oi.product_id
             WHERE oi.order_id IN ($placeholders)
-              " . (($brandId !== false && $brandId !== null) ? "AND p.brand_id = ?" : "") . "
+              " . (($brandId !== false && $brandId !== null) ? "AND (
+                  p.brand_id = ?
+                  OR EXISTS (
+                      SELECT 1
+                      FROM product_sets ps_b
+                      JOIN product_set_items psi_b ON psi_b.product_set_id = ps_b.id
+                      JOIN products cp_b ON cp_b.id = psi_b.product_id
+                      WHERE ps_b.set_name = p.name
+                        AND cp_b.brand_id = ?
+                  )
+              )" : "") . "
             ORDER BY oi.order_id, oi.id
         ");
         $productParams = $detailedOrderIds;
         if ($brandId !== false && $brandId !== null) {
+            $productParams[] = (int)$brandId;
             $productParams[] = (int)$brandId;
         }
         $productStmt->execute($productParams);
@@ -758,6 +780,20 @@ try {
             $productLines[] = $product['name'] . ' (' . number_format((float)$product['quantity'], 0) . 'x, $' . number_format((float)$product['line_total'], 0) . ')';
         }
         $order['products_summary'] = implode("\n", $productLines);
+
+        if ($brandId !== false && $brandId !== null) {
+            $brandLineTotal = 0.0;
+            $brandItemCount = 0;
+            $brandQty = 0.0;
+            foreach ($order['products'] as $pItem) {
+                $brandLineTotal += (float)($pItem['line_total'] ?? 0);
+                $brandQty += (float)($pItem['quantity'] ?? 0);
+                $brandItemCount++;
+            }
+            $order['total_amount'] = $brandLineTotal;
+            $order['item_count'] = $brandItemCount;
+            $order['total_quantity'] = $brandQty;
+        }
 
         $isCancelled = (int)($order['is_cancelled'] ?? 0) === 1;
         $isReturned = (int)($order['is_returned'] ?? 0) === 1;

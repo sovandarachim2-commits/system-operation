@@ -168,8 +168,19 @@ try {
             FROM order_items filter_oi
             JOIN products filter_p ON filter_p.id = filter_oi.product_id
             WHERE filter_oi.order_id = o.id
-              AND filter_p.brand_id = ?
+              AND (
+                  filter_p.brand_id = ?
+                  OR EXISTS (
+                      SELECT 1
+                      FROM product_sets ps_brand
+                      JOIN product_set_items psi_brand ON psi_brand.product_set_id = ps_brand.id
+                      JOIN products cp_brand ON cp_brand.id = psi_brand.product_id
+                      WHERE ps_brand.set_name = filter_p.name
+                        AND cp_brand.brand_id = ?
+                  )
+              )
         )';
+        $params[] = (int)$brandId;
         $params[] = (int)$brandId;
     }
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';

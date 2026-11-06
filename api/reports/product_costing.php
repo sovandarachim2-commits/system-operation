@@ -106,7 +106,7 @@ function pc_load(PDO $pdo): void
     pc_history_ensure_schema($pdo);
 
     [$from, $to, $month] = pc_request_range();
-    pc_lock_respond_if_locked($pdo, 'online', $month);
+    pc_lock_respond_if_locked($pdo, 'online', $month, false, $from, $to);
     $q = trim((string)($_GET['q'] ?? ''));
     $brandIds = pc_brand_ids($_GET['brand_ids'] ?? $_GET['brand_id'] ?? '');
 

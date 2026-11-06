@@ -282,7 +282,12 @@ function dealer_api_next_order_code(PDO $pdo, string $orderDate): string
 function dealer_api_fetch(PDO $pdo, array $options = []): array
 {
     if (($options['scope'] ?? '') === 'revenue') {
-        return dealer_api_fetch_revenue($pdo, (string)($options['from'] ?? ''), (string)($options['to'] ?? ''));
+        return dealer_api_fetch_revenue(
+            $pdo,
+            (string)($options['from'] ?? ''),
+            (string)($options['to'] ?? ''),
+            isset($options['brand_id']) && $options['brand_id'] !== false && $options['brand_id'] !== null ? (int)$options['brand_id'] : null
+        );
     }
 
     $dealers = $pdo->query("
@@ -741,7 +746,7 @@ function dealer_api_save_order(PDO $pdo, array $payload, array $user): void
     }
 }
 
-function dealer_api_fetch_revenue(PDO $pdo, string $from, string $to): array
+function dealer_api_fetch_revenue(PDO $pdo, string $from, string $to, ?int $brandId = null): array
 {
     $where = [];
     $params = [];
@@ -752,6 +757,27 @@ function dealer_api_fetch_revenue(PDO $pdo, string $from, string $to): array
     if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $to)) {
         $where[] = 'o.order_date <= ?';
         $params[] = $to;
+    }
+    if ($brandId !== null && $brandId > 0) {
+        $where[] = 'EXISTS (
+            SELECT 1
+            FROM dealer_order_items doi
+            JOIN products p ON p.id = doi.product_id
+            WHERE doi.order_id = o.id
+              AND (
+                  p.brand_id = ?
+                  OR EXISTS (
+                      SELECT 1
+                      FROM product_sets ps_brand
+                      JOIN product_set_items psi_brand ON psi_brand.product_set_id = ps_brand.id
+                      JOIN products cp_brand ON cp_brand.id = psi_brand.product_id
+                      WHERE ps_brand.set_name = p.name
+                        AND cp_brand.brand_id = ?
+                  )
+              )
+        )';
+        $params[] = $brandId;
+        $params[] = $brandId;
     }
     $whereSql = $where ? 'WHERE ' . implode(' AND ', $where) : '';
     $stmt = $pdo->prepare("
@@ -767,8 +793,31 @@ function dealer_api_fetch_revenue(PDO $pdo, string $from, string $to): array
     $paymentsByOrder = [];
     if ($ids) {
         $placeholders = implode(',', array_fill(0, count($ids), '?'));
-        $itemStmt = $pdo->prepare("SELECT * FROM dealer_order_items WHERE order_id IN ($placeholders) ORDER BY order_id ASC, id ASC");
-        $itemStmt->execute($ids);
+        $itemSql = "
+            SELECT doi.*
+            FROM dealer_order_items doi
+            LEFT JOIN products p ON p.id = doi.product_id
+            WHERE doi.order_id IN ($placeholders)
+        ";
+        $itemParams = $ids;
+        if ($brandId !== null && $brandId > 0) {
+            $itemSql .= " AND (
+                p.brand_id = ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM product_sets ps_brand
+                    JOIN product_set_items psi_brand ON psi_brand.product_set_id = ps_brand.id
+                    JOIN products cp_brand ON cp_brand.id = psi_brand.product_id
+                    WHERE ps_brand.set_name = p.name
+                      AND cp_brand.brand_id = ?
+                )
+            )";
+            $itemParams[] = $brandId;
+            $itemParams[] = $brandId;
+        }
+        $itemSql .= " ORDER BY doi.order_id ASC, doi.id ASC";
+        $itemStmt = $pdo->prepare($itemSql);
+        $itemStmt->execute($itemParams);
         foreach ($itemStmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
             $itemsByOrder[(int)$row['order_id']][] = [
                 'id' => (int)$row['id'],
@@ -808,12 +857,19 @@ function dealer_api_fetch_revenue(PDO $pdo, string $from, string $to): array
         }
     }
 
-    $orders = array_map(static function (array $order) use ($itemsByOrder, $paymentsByOrder): array {
+    $orders = array_map(static function (array $order) use ($itemsByOrder, $paymentsByOrder, $brandId): array {
         $id = (int)$order['id'];
         $order['id'] = $id;
-        $order['lines'] = $itemsByOrder[$id] ?? [];
+        $lines = $itemsByOrder[$id] ?? [];
+        $order['lines'] = $lines;
         $order['payments'] = $paymentsByOrder[$id] ?? [];
         $order['logs'] = [];
+        if ($brandId !== null && $brandId > 0) {
+            $brandTotal = array_sum(array_map(fn($item) => (float)$item['line_total'], $lines));
+            $order['total_amount'] = $brandTotal;
+            $order['final_amount'] = $brandTotal;
+            $order['subtotal'] = $brandTotal;
+        }
         return $order;
     }, $orders);
 
@@ -853,10 +909,12 @@ try {
         'sr_dealer_reports.view',
         'reports_data.view'
     );
+    $brandId = filter_var($_GET['brand_id'] ?? null, FILTER_VALIDATE_INT);
     api_json(['success' => true, ...dealer_api_fetch($pdo, [
         'scope' => $scope,
         'from' => (string)($_GET['from'] ?? ''),
         'to' => (string)($_GET['to'] ?? ''),
+        'brand_id' => $brandId !== false ? $brandId : null,
     ])]);
 } catch (Throwable $e) {
     error_log('dealer_orders API error: ' . $e->getMessage());

@@ -111,6 +111,140 @@ try {
 
     $supplierOptions = $pdo->query('SELECT id AS value, name AS label FROM purchase_vendors ORDER BY name')->fetchAll(PDO::FETCH_ASSOC);
 
+    if ($orders && api_table_exists($pdo, 'purchase_order_items')) {
+        $poIds = array_map(static fn(array $r): int => (int)$r['id'], $orders);
+        $placeholders = implode(',', array_fill(0, count($poIds), '?'));
+        $poiStmt = $pdo->prepare("
+            SELECT purchase_order_id,
+                   COALESCE(NULLIF(TRIM(item_name), ''), 'Item') AS item_name,
+                   COALESCE(SUM(quantity_ordered), 0) AS qty,
+                   COALESCE(SUM(CASE WHEN line_total > 0 THEN line_total ELSE quantity_ordered * unit_price END), 0) AS cost
+            FROM purchase_order_items
+            WHERE purchase_order_id IN ($placeholders)
+            GROUP BY purchase_order_id, COALESCE(NULLIF(TRIM(item_name), ''), 'Item')
+        ");
+        $poiStmt->execute($poIds);
+        $itemsByPo = [];
+        foreach ($poiStmt->fetchAll(PDO::FETCH_ASSOC) as $it) {
+            $itemsByPo[(int)$it['purchase_order_id']][(string)$it['item_name']] = [
+                'qty' => (float)$it['qty'],
+                'cost' => (float)$it['cost'],
+            ];
+        }
+        foreach ($orders as &$order) {
+            $order['supplier'] = $order['vendor_name'] ?? '';
+            $order['po_no'] = $order['order_number'] ?? '';
+            $order['products'] = $itemsByPo[(int)$order['id']] ?? [];
+        }
+        unset($order);
+    }
+
+    $receiving = [];
+    if (api_table_exists($pdo, 'purchase_receiving') && api_table_exists($pdo, 'purchase_receiving_items')) {
+        $recSql = "
+            SELECT pr.id, DATE(pr.receiving_date) AS receiving_date,
+                   po.order_number AS po_no, COALESCE(pv.name, '') AS supplier,
+                   COALESCE(u.name, '') AS received_by,
+                   COALESCE(items.total_qty, 0) AS total_qty,
+                   COALESCE(items.total_cost, 0) AS total_cost
+            FROM purchase_receiving pr
+            JOIN purchase_orders po ON po.id = pr.purchase_order_id
+            LEFT JOIN purchase_vendors pv ON pv.id = po.vendor_id
+            LEFT JOIN users u ON u.id = pr.received_by
+            LEFT JOIN (
+                SELECT receiving_id, SUM(quantity_received) AS total_qty,
+                       SUM(total_cost) AS total_cost
+                FROM purchase_receiving_items GROUP BY receiving_id
+            ) items ON items.receiving_id = pr.id
+            WHERE DATE(pr.receiving_date) >= ? AND DATE(pr.receiving_date) <= ?
+        ";
+        $recParams = [$from, $to];
+        if ($vendorId > 0) {
+            $recSql .= " AND po.vendor_id = ?";
+            $recParams[] = $vendorId;
+        }
+        $recSql .= " ORDER BY pr.receiving_date DESC, pr.id DESC";
+        $recStmt = $pdo->prepare($recSql);
+        $recStmt->execute($recParams);
+        $receiving = $recStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if ($receiving) {
+            $recIds = array_map(static fn(array $r): int => (int)$r['id'], $receiving);
+            $recPlaceholders = implode(',', array_fill(0, count($recIds), '?'));
+            $recItemStmt = $pdo->prepare("
+                SELECT pri.receiving_id, COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item') AS item_name,
+                       SUM(pri.quantity_received) AS qty, SUM(pri.total_cost) AS cost
+                FROM purchase_receiving_items pri
+                JOIN purchase_order_items poi ON poi.id = pri.purchase_order_item_id
+                WHERE pri.receiving_id IN ($recPlaceholders)
+                GROUP BY pri.receiving_id, COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item')
+            ");
+            $recItemStmt->execute($recIds);
+            $productsByReceipt = [];
+            foreach ($recItemStmt->fetchAll(PDO::FETCH_ASSOC) as $it) {
+                $productsByReceipt[(int)$it['receiving_id']][(string)$it['item_name']] = [
+                    'qty' => (float)$it['qty'],
+                    'cost' => (float)$it['cost'],
+                ];
+            }
+            foreach ($receiving as &$rRow) {
+                $rRow['products'] = $productsByReceipt[(int)$rRow['id']] ?? [];
+            }
+            unset($rRow);
+        }
+    }
+
+    $returns = [];
+    if (api_table_exists($pdo, 'purchase_returns') && api_table_exists($pdo, 'purchase_return_items')) {
+        $retSql = "
+            SELECT pr.id, DATE(pr.return_date) AS return_date, pr.return_number,
+                   COALESCE(pv.name, '') AS supplier, COALESCE(u.name, '') AS returned_by,
+                   COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item') AS item_name,
+                   COALESCE(SUM(pri.quantity_returned), 0) AS qty,
+                   COALESCE(SUM(pri.total_cost), 0) AS cost
+            FROM purchase_returns pr
+            LEFT JOIN purchase_vendors pv ON pv.id = pr.vendor_id
+            LEFT JOIN users u ON u.id = pr.created_by
+            LEFT JOIN purchase_return_items pri ON pri.purchase_return_id = pr.id
+            LEFT JOIN purchase_order_items poi ON poi.id = pri.purchase_order_item_id
+            WHERE DATE(pr.return_date) >= ? AND DATE(pr.return_date) <= ?
+              AND LOWER(COALESCE(pr.status, '')) NOT IN ('cancel','cancelled','canceled')
+        ";
+        $retParams = [$from, $to];
+        if ($vendorId > 0) {
+            $retSql .= " AND pr.vendor_id = ?";
+            $retParams[] = $vendorId;
+        }
+        $retSql .= "
+            GROUP BY pr.id, DATE(pr.return_date), pr.return_number, pv.name, u.name,
+                     COALESCE(NULLIF(TRIM(poi.item_name), ''), 'Item')
+            ORDER BY pr.return_date DESC, pr.id DESC
+        ";
+        $retStmt = $pdo->prepare($retSql);
+        $retStmt->execute($retParams);
+        $retItems = $retStmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $retMap = [];
+        foreach ($retItems as $it) {
+            $id = (int)$it['id'];
+            if (!isset($retMap[$id])) {
+                $retMap[$id] = [
+                    'id' => $id,
+                    'return_date' => $it['return_date'],
+                    'return_number' => $it['return_number'],
+                    'supplier' => $it['supplier'],
+                    'returned_by' => $it['returned_by'],
+                    'products' => [],
+                ];
+            }
+            $retMap[$id]['products'][(string)$it['item_name']] = [
+                'qty' => (float)$it['qty'],
+                'cost' => (float)$it['cost'],
+            ];
+        }
+        $returns = array_values($retMap);
+    }
+
     api_json([
         'success' => true,
         'filters' => ['from' => $from, 'to' => $to, 'vendor_id' => $vendorId, 'status' => $status],
@@ -119,6 +253,8 @@ try {
         'vendors' => $vendors,
         'products' => $products,
         'supplier_options' => $supplierOptions,
+        'receiving' => $receiving,
+        'returns' => $returns,
     ]);
 } catch (Throwable $e) {
     api_error($e->getMessage(), 500);

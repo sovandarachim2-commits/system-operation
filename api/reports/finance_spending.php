@@ -37,10 +37,40 @@ try {
         ]);
     }
 
-    $from = fs_report_date($_GET['from'] ?? $_GET['from_date'] ?? null, date('Y-m-01'));
-    $to = fs_report_date($_GET['to'] ?? $_GET['to_date'] ?? null, date('Y-m-d'));
-    if ($from > $to) {
-        [$from, $to] = [$to, $from];
+    $allTime = !empty($_GET['all_time']) && $_GET['all_time'] !== '0' && $_GET['all_time'] !== 'false';
+    $rawFrom = trim((string)($_GET['from'] ?? $_GET['from_date'] ?? ''));
+    $rawTo = trim((string)($_GET['to'] ?? $_GET['to_date'] ?? ''));
+
+    if (!$allTime && $rawFrom === '' && $rawTo === '' && (isset($_GET['all']) || isset($_GET['all_time']))) {
+        $allTime = true;
+    }
+
+    $whereClause = '';
+    $queryParams = [];
+
+    if ($allTime) {
+        // All time: no date filter
+    } elseif ($rawFrom !== '' && $rawTo !== '') {
+        $from = fs_report_date($rawFrom, date('Y-m-01'));
+        $to = fs_report_date($rawTo, date('Y-m-d'));
+        if ($from > $to) {
+            [$from, $to] = [$to, $from];
+        }
+        $whereClause = 'WHERE DATE(fs.spending_date) BETWEEN ? AND ?';
+        $queryParams = [$from, $to];
+    } elseif ($rawFrom !== '') {
+        $from = fs_report_date($rawFrom, date('Y-m-01'));
+        $whereClause = 'WHERE DATE(fs.spending_date) >= ?';
+        $queryParams = [$from];
+    } elseif ($rawTo !== '') {
+        $to = fs_report_date($rawTo, date('Y-m-d'));
+        $whereClause = 'WHERE DATE(fs.spending_date) <= ?';
+        $queryParams = [$to];
+    } else {
+        $from = date('Y-m-01');
+        $to = date('Y-m-d');
+        $whereClause = 'WHERE DATE(fs.spending_date) BETWEEN ? AND ?';
+        $queryParams = [$from, $to];
     }
 
     $hasCompany = fs_report_table_has($pdo, 'finance_spending', 'company_id') && api_table_exists($pdo, 'companies');
@@ -73,10 +103,10 @@ try {
             OR (fs.created_by COLLATE utf8mb4_unicode_ci = u.username COLLATE utf8mb4_unicode_ci)
         )
         {$companyJoin}
-        WHERE DATE(fs.spending_date) BETWEEN ? AND ?
+        {$whereClause}
         ORDER BY fs.spending_date ASC, fs.id ASC
     ");
-    $stmt->execute([$from, $to]);
+    $stmt->execute($queryParams);
 
     $rows = [];
     $total = 0.0;

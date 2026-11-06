@@ -646,9 +646,15 @@ function pc_lock_filter_rows(array $rows): array
         }
     }
     $teamIds = pc_brand_ids($_GET['team_ids'] ?? $_GET['team_id'] ?? '');
+    $dealerIds = pc_brand_ids($_GET['dealer_ids'] ?? $_GET['dealer_id'] ?? '');
+    $includeUnsold = pc_include_unsold();
+    $paymentStatuses = pc_payment_statuses();
 
-    return array_values(array_filter($rows, static function ($row) use ($q, $brandIds, $teamIds): bool {
+    return array_values(array_filter($rows, static function ($row) use ($q, $brandIds, $teamIds, $dealerIds, $includeUnsold, $paymentStatuses): bool {
         if (!is_array($row)) {
+            return false;
+        }
+        if (!$includeUnsold && (float)($row['sold_qty'] ?? 0) <= 0) {
             return false;
         }
         if ($brandIds && !in_array((int)($row['brand_id'] ?? 0), $brandIds, true)) {
@@ -656,6 +662,21 @@ function pc_lock_filter_rows(array $rows): array
         }
         if ($teamIds && !in_array((int)($row['team_id'] ?? 0), $teamIds, true)) {
             return false;
+        }
+        if ($dealerIds && !in_array((int)($row['dealer_id'] ?? 0), $dealerIds, true)) {
+            return false;
+        }
+        if ($paymentStatuses !== null) {
+            $matched = false;
+            foreach (($row['transactions'] ?? []) as $tx) {
+                if (in_array((string)($tx['payment_status'] ?? ''), $paymentStatuses, true)) {
+                    $matched = true;
+                    break;
+                }
+            }
+            if (!$matched) {
+                return false;
+            }
         }
         if ($q === '') {
             return true;
@@ -665,6 +686,7 @@ function pc_lock_filter_rows(array $rows): array
             (string)($row['sku'] ?? ''),
             (string)($row['brand_name'] ?? ''),
             (string)($row['team_name'] ?? ''),
+            (string)($row['dealer_name'] ?? ''),
         ]));
         return str_contains($haystack, $q);
     }));
@@ -675,11 +697,14 @@ function pc_lock_summary(array $stored, array $rows, bool $filtered): array
     if (!$filtered) {
         return $stored;
     }
+    $paymentSummary = pc_summary_payment_nets($rows);
     $summary = $stored;
     $summary['products'] = count($rows);
     $summary['missing_cost'] = count(array_filter($rows, static fn(array $row): bool => (bool)($row['missing_cost'] ?? false)));
     $summary['sold_qty'] = array_sum(array_map(static fn(array $row): float => (float)($row['sold_qty'] ?? 0), $rows));
     $summary['net_sales'] = array_sum(array_map(static fn(array $row): float => (float)($row['net_sales'] ?? 0), $rows));
+    $summary['paid_net_sales'] = $paymentSummary['paid_net_sales'];
+    $summary['balance_net_sales'] = $paymentSummary['balance_net_sales'];
     $summary['total_cost'] = array_sum(array_map(static fn(array $row): float => (float)($row['total_cost'] ?? 0), $rows));
     $summary['gross_profit'] = array_sum(array_map(static fn(array $row): float => (float)($row['gross_profit'] ?? 0), $rows));
     return $summary;
@@ -774,8 +799,30 @@ function pc_lock_public(?array $row): ?array
     ];
 }
 
-function pc_lock_respond_if_locked(PDO $pdo, string $channel, string $month, bool $summaryOnly = false): void
-{
+function pc_lock_respond_if_locked(
+    PDO $pdo,
+    string $channel,
+    string $month,
+    bool $summaryOnly = false,
+    ?string $from = null,
+    ?string $to = null
+): void {
+    // If request is in date filter mode (or custom date range), do not serve frozen snapshot -> keep LIVE!
+    $filterMode = strtolower(trim((string)($_GET['filter_mode'] ?? '')));
+    $isDateFilter = (string)($_GET['is_date_filter'] ?? '') === '1' || $filterMode === 'date';
+    if ($isDateFilter) {
+        return;
+    }
+
+    // If custom date range does not match the full month bounds, query is LIVE
+    if ($from !== null && $to !== null && $month !== '') {
+        $expectedFrom = $month . '-01';
+        $expectedTo = date('Y-m-t', strtotime($expectedFrom) ?: time());
+        if ($from !== $expectedFrom || $to !== $expectedTo) {
+            return;
+        }
+    }
+
     $row = pc_lock_row($pdo, $channel, $month);
     if (!pc_lock_is_locked($row)) {
         return;
@@ -784,7 +831,7 @@ function pc_lock_respond_if_locked(PDO $pdo, string $channel, string $month, boo
     $storedRows = is_array($snapshot['rows'] ?? null) ? $snapshot['rows'] : [];
     $storedSummary = is_array($snapshot['summary'] ?? null) ? $snapshot['summary'] : [];
     $filteredRows = pc_lock_filter_rows($storedRows);
-    $filtered = count($filteredRows) !== count($storedRows);
+    $filtered = count($filteredRows) !== count($storedRows) || pc_payment_statuses() !== null || !pc_include_unsold();
     api_json([
         'success' => true,
         'locked' => true,
